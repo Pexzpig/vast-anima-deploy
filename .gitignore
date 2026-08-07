@@ -1,0 +1,7 @@
+state/*.json
+state/*.log
+state/*.tmp
+!state/.gitkeep
+*.key
+*.pem
+.env
