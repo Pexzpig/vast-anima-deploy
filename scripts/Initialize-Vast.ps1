@@ -1,7 +1,8 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$ConfigPath,
-    [Security.SecureString]$ApiKey
+    [Security.SecureString]$ApiKey,
+    [switch]$IgnoreEnvironment
 )
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
@@ -13,17 +14,21 @@ Assert-CommandExists -Name $cli
 
 if ($null -eq $ApiKey) {
     $envName = [string]$config.Secrets.VastApiKeyEnvironmentVariable
-    $envValue = [Environment]::GetEnvironmentVariable($envName)
+    $envValue = if ($IgnoreEnvironment) { $null } else { [Environment]::GetEnvironmentVariable($envName) }
     if ($envValue) {
         $ApiKey = ConvertTo-SecureString -String $envValue -AsPlainText -Force
     }
     else {
-        $ApiKey = Read-Host "Enter Vast API key (or set $envName)" -AsSecureString
+        Write-Host ''
+        Write-Host 'Vast CLI 登录向导' -ForegroundColor Cyan
+        Write-Host '请粘贴 Vast.ai API key；输入内容不会显示。' -ForegroundColor Cyan
+        $ApiKey = Read-Host "Vast API key（也可预先设置 $envName）" -AsSecureString
     }
 }
 
 $credential = New-Object System.Management.Automation.PSCredential('vast', $ApiKey)
 $plainKey = $credential.GetNetworkCredential().Password
+if ([string]::IsNullOrWhiteSpace($plainKey)) { throw 'Vast API key 不能为空。' }
 try {
     $result = Invoke-NativeCommandCapture -Command $cli -Arguments @('set', 'api-key', $plainKey)
     if ($result.ExitCode -ne 0) {

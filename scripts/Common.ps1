@@ -126,11 +126,91 @@ function Invoke-NativeCommandChecked {
     }
 }
 
-function Test-VastAuthentication {
+function Get-VastAuthenticationStatus {
     param([Parameter(Mandatory = $true)][string]$CliPath)
 
     $result = Invoke-NativeCommandCapture -Command $CliPath -Arguments @('show', 'user', '--raw')
-    return ($result.ExitCode -eq 0)
+    $response = $null
+    if ($result.Text) {
+        try { $response = ConvertFrom-LooseJson -Text $result.Text } catch {}
+    }
+
+    $reportedError = if ($null -ne $response) {
+        [bool](Get-ObjectProperty -Object $response -Names @('error', 'success') -Default $false)
+    } else {
+        $false
+    }
+    if ($null -ne $response -and $response.PSObject.Properties.Name -contains 'success') {
+        $reportedError = -not [bool]$response.success
+    }
+
+    $userId = Get-ObjectProperty -Object $response -Names @('id', 'user_id')
+    $email = Get-ObjectProperty -Object $response -Names @('email', 'username')
+    if ($result.ExitCode -eq 0 -and -not $reportedError -and ($null -ne $userId -or $null -ne $email)) {
+        return [pscustomobject]@{
+            Authenticated = $true
+            UserId = $userId
+            Email = $email
+            User = $response
+            RawText = $result.Text
+            Reason = 'Authenticated'
+        }
+    }
+
+    $statusCode = Get-ObjectProperty -Object $response -Names @('status_code', 'status') -Default 0
+    $authenticationFailure = ([string]$statusCode -in @('401', '403')) -or
+        ($result.Text -match '(?i)requires login|not logged|unauthori[sz]ed|forbidden|invalid.*api.?key')
+    if ($authenticationFailure) {
+        return [pscustomobject]@{
+            Authenticated = $false
+            UserId = $null
+            Email = $null
+            User = $response
+            RawText = $result.Text
+            Reason = 'AuthenticationRequired'
+        }
+    }
+
+    throw "[VAST_AUTH_CHECK_FAILED] 无法确认 Vast CLI 登录状态（退出码 $($result.ExitCode)）。请检查网络或 CLI 配置。`n$($result.Text)"
+}
+
+function Test-VastAuthentication {
+    param([Parameter(Mandatory = $true)][string]$CliPath)
+
+    return [bool](Get-VastAuthenticationStatus -CliPath $CliPath).Authenticated
+}
+
+function Test-SshPublicKeyRegistered {
+    param(
+        [Parameter(Mandatory = $true)][string]$PublicKeyPath,
+        [Parameter(Mandatory = $true)][string]$AccountText
+    )
+
+    if (-not (Test-Path -LiteralPath $PublicKeyPath -PathType Leaf)) { return $false }
+    $parts = (Get-Content -LiteralPath $PublicKeyPath -Raw).Trim() -split '\s+'
+    if ($parts.Count -lt 2 -or -not $parts[1]) { return $false }
+    return ($AccountText -match [regex]::Escape($parts[1]))
+}
+
+function Test-SshKeyPairUsable {
+    param(
+        [Parameter(Mandatory = $true)][string]$PrivateKeyPath,
+        [Parameter(Mandatory = $true)][string]$PublicKeyPath
+    )
+
+    if (-not (Test-Path -LiteralPath $PrivateKeyPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $PublicKeyPath -PathType Leaf)) {
+        return $false
+    }
+    # -P with an empty passphrase prevents an interactive prompt. A protected
+    # or mismatched key is not suitable for unattended deployment.
+    $derived = Invoke-NativeCommandCapture -Command 'ssh-keygen' -Arguments @(
+        '-y', '-P', '""', '-f', $PrivateKeyPath
+    )
+    if ($derived.ExitCode -ne 0) { return $false }
+    $derivedParts = $derived.Text.Trim() -split '\s+'
+    $publicParts = (Get-Content -LiteralPath $PublicKeyPath -Raw).Trim() -split '\s+'
+    return ($derivedParts.Count -ge 2 -and $publicParts.Count -ge 2 -and $derivedParts[1] -eq $publicParts[1])
 }
 
 function ConvertFrom-LooseJson {

@@ -15,20 +15,21 @@ Vast.ai 会对实例和存储计费。脚本只会在创建付费资源、销毁
 
 1. 检查 PowerShell、OpenSSH、Python 和 Vast CLI；
 2. Vast CLI 缺失时询问一次，然后通过 Python/pip 自动安装；
-3. 检查 Vast.ai 登录状态；未登录时安全读取 API key，并交给 Vast CLI 保存；
-4. 检查本机 SSH 公钥；缺失时询问一次并生成 Ed25519 密钥；
-5. 检查 Vast.ai 账户的 SSH 公钥，必要时自动注册；
-6. 在四页 CLI 向导中初始化部署和搜索参数；
-7. 生成本地用户配置，最后询问是否立即搜索并部署。
+3. 使用 `vastai show user --raw` 验证当前 API key；只有明确的 401/403 才进入登录引导，网络错误会单独报告；
+4. 未登录时引导用户从 Vast Keys 页面取得 API key，并通过 CLI `set api-key` 保存，然后再次验证账户；
+5. 检查本机 SSH 私钥与公钥是否真实匹配且适合非交互连接；没有可用 key pair 时自动生成专用 Ed25519 key；
+6. 每次实时读取 Vast.ai 账户 SSH keys，必要时自动注册本机公钥并再次验证；
+7. 在四页 CLI 向导中初始化部署和搜索参数；
+8. 生成本地用户配置，最后询问是否立即搜索并部署。
 
-API key 不写入仓库或生成的 JSON。环境中已设置 `VAST_API_KEY` 时，认证脚本会直接使用它。
+API key 不写入仓库或生成的 JSON。环境中已设置 `VAST_API_KEY` 时会优先验证；如果该值无效，脚本会指出它覆盖了 CLI 本地凭据，在当前进程忽略它并引导重新登录。
 
 ### CLI 参数向导
 
 向导不要求用户了解 Vast 查询语法，只需选择或输入：
 
 - 部署配置：`vastai/comfy` 预装镜像或基础镜像；
-- 允许的 GPU 型号；
+- 允许的 GPU 型号或分类：GeForce RTX 30/40/50、RTX Ada/RTX PRO、RTX A 工作站，以及 A10/A40/L4/L40、A100/A800、H100/H200/B200 等现代数据中心系列；
 - 最低显存和最高每小时 GPU 价格；
 - 最低可靠度、下载速度和 CUDA 版本；
 - 搜索结果上限；
@@ -43,10 +44,10 @@ user-config/
 ├── launcher.json          # 当前 profile 和配置路径
 ├── vast-comfy.json        # 预装镜像的用户参数（选择该 profile 时）
 ├── base-image.json        # 基础镜像的用户参数（选择该 profile 时）
-└── environment.json       # 已注册 SSH 公钥的本地标记
+└── environment.json       # 最近一次实时验证通过的 SSH key pair 和 Vast 用户标记
 ```
 
-这些 JSON 已被 Git 忽略。它们不含 API key，但可能包含本机 SSH 公钥路径。
+这些 JSON 已被 Git 忽略。它们不含 API key，但会包含本机 SSH 私钥/公钥路径。`environment.json` 只作为诊断记录；后续启动仍会实时检查 Vast 账户，不会仅凭该文件判断 SSH 已配置。
 
 ## 日常使用
 

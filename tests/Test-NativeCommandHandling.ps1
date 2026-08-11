@@ -20,8 +20,37 @@ if ($capture.Text -notmatch 'This action requires login') {
 
 # Test the exact login probe shape with a deterministic Vast CLI fixture.
 $fakeVastCli = Join-Path $PSScriptRoot 'fixtures\fake-vast-403.cmd'
-if (Test-VastAuthentication -CliPath $fakeVastCli) {
+$unauthenticatedStatus = Get-VastAuthenticationStatus -CliPath $fakeVastCli
+if ($unauthenticatedStatus.Authenticated -or $unauthenticatedStatus.Reason -ne 'AuthenticationRequired') {
     throw 'A 403 login response was incorrectly treated as authenticated.'
+}
+
+$networkFailureCaught = $false
+try {
+    Get-VastAuthenticationStatus -CliPath (Join-Path $PSScriptRoot 'fixtures\fake-vast-network-error.cmd') | Out-Null
+}
+catch {
+    $networkFailureCaught = $true
+    if ($_.Exception.Message -notmatch 'VAST_AUTH_CHECK_FAILED') {
+        throw "A non-authentication CLI failure was misclassified: $($_.Exception.Message)"
+    }
+}
+if (-not $networkFailureCaught) {
+    throw 'A non-authentication CLI failure was incorrectly accepted.'
+}
+
+$authenticatedCli = Join-Path $PSScriptRoot 'fixtures\fake-vast-authenticated.cmd'
+$authenticatedStatus = Get-VastAuthenticationStatus -CliPath $authenticatedCli
+if (-not $authenticatedStatus.Authenticated -or $authenticatedStatus.UserId -ne 123) {
+    throw 'A valid show-user response was not recognized as authenticated.'
+}
+
+$fixturePublicKey = Join-Path $PSScriptRoot 'fixtures\fake-public-key.pub'
+if (-not (Test-SshPublicKeyRegistered -PublicKeyPath $fixturePublicKey -AccountText $authenticatedStatus.RawText)) {
+    throw 'The registered SSH public key was not detected in the Vast account response.'
+}
+if (Test-SshPublicKeyRegistered -PublicKeyPath $fixturePublicKey -AccountText '{"ssh_key":"ssh-ed25519 OTHERKEY"}') {
+    throw 'An unrelated SSH public key was incorrectly treated as registered.'
 }
 
 $environmentFailureCaught = $false

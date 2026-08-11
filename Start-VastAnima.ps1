@@ -28,6 +28,19 @@ function Get-LauncherSelection {
     return Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
+function Update-LauncherSshIdentity {
+    param($Selection, [string]$PrivateKeyPath)
+
+    if ($null -eq $Selection -or -not $PrivateKeyPath) { return }
+    $configPath = Resolve-ProjectPath -Path ([string]$Selection.config_path)
+    if ([System.IO.Path]::GetExtension($configPath) -ine '.json') { return }
+    $selectedConfig = Get-DeployConfig -ConfigPath $configPath
+    if ([string]$selectedConfig.Vast.Ssh.IdentityFile -eq $PrivateKeyPath) { return }
+    $selectedConfig.Vast.Ssh.IdentityFile = $PrivateKeyPath
+    Save-JsonFile -Path $configPath -Value $selectedConfig | Out-Null
+    Write-Host "当前部署配置已绑定 SSH 私钥：$PrivateKeyPath" -ForegroundColor Green
+}
+
 function Switch-LauncherProfile {
     param($CurrentSelection)
 
@@ -52,12 +65,14 @@ function Switch-LauncherProfile {
             config_path = $relativeConfigPath
             selected_at = (Get-Date).ToUniversalTime().ToString('o')
         }) | Out-Null
+        Update-LauncherSshIdentity -Selection (Get-LauncherSelection) -PrivateKeyPath $environmentStatus.SshPrivateKey
         Write-Host "已切换到 $targetProfile；已有搜索参数保持不变。" -ForegroundColor Green
         return
     }
 
     Write-Host "$targetProfile 尚未初始化，接下来只需填写一次该配置的搜索参数。" -ForegroundColor Cyan
     & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') -Profile $targetProfile -Force | Out-Host
+    Update-LauncherSshIdentity -Selection (Get-LauncherSelection) -PrivateKeyPath $environmentStatus.SshPrivateKey
 }
 
 function Get-LocalDeploymentSummary {
@@ -200,13 +215,17 @@ function Invoke-LauncherOperation {
 $selection = Get-LauncherSelection
 $firstRun = ($null -eq $selection)
 $environmentConfig = if ($firstRun) { Join-Path $projectRoot 'config.psd1' } else { Resolve-ProjectPath -Path ([string]$selection.config_path) }
-& (Join-Path $scriptsRoot 'Initialize-Environment.ps1') -ConfigPath $environmentConfig
+$environmentStatus = & (Join-Path $scriptsRoot 'Initialize-Environment.ps1') -ConfigPath $environmentConfig -PassThru
+if (-not $firstRun) {
+    Update-LauncherSshIdentity -Selection $selection -PrivateKeyPath $environmentStatus.SshPrivateKey
+}
 
 if ($firstRun) {
     Write-Host ''
     Write-Host '这是首次运行。接下来通过终端向导初始化搜索和部署参数。' -ForegroundColor Cyan
     & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') | Out-Host
     $selection = Get-LauncherSelection
+    Update-LauncherSshIdentity -Selection $selection -PrivateKeyPath $environmentStatus.SshPrivateKey
     if ($Action -in @('Configure', 'SwitchProfile')) { $Action = 'Menu' }
     if ($Action -eq 'Menu' -and (Read-LauncherYesNo -Prompt '初始化已完成，现在搜索报价并开始部署吗？')) {
         $Action = 'Deploy'
@@ -222,6 +241,7 @@ if ($Action -ne 'Menu') {
 
 while ($true) {
     $selection = Get-LauncherSelection
+    Update-LauncherSshIdentity -Selection $selection -PrivateKeyPath $environmentStatus.SshPrivateKey
     $config = Get-DeployConfig -ConfigPath ([string]$selection.config_path)
     $summary = Get-LocalDeploymentSummary -Config $config
     $selectedAction = Show-LauncherMenu -Selection $selection -Config $config -Summary $summary

@@ -11,7 +11,7 @@
         Cli = 'vastai'
 
         Search = @{
-            Query = 'gpu_name in [RTX_4090,RTX_3090,RTX_A5000,A40,L40S] num_gpus=1 gpu_ram>=16 verified=true rentable=true rented=false direct_port_count>=1 reliability>0.98 inet_down>200 cuda_vers>=12.8 dph_total<=0.80'
+            Query = 'gpu_name in [RTX_3090,RTX_3090_Ti,RTX_4080,RTX_4080S,RTX_4090,RTX_4090D,RTX_5080,RTX_5090,RTX_4000Ada,RTX_4500Ada,RTX_5000Ada,RTX_5880Ada,RTX_6000Ada,RTX_PRO_4000,RTX_PRO_4500,RTX_PRO_5000,RTX_PRO_6000_S,RTX_PRO_6000_WS,RTX_A4000,RTX_A4500,RTX_A5000,RTX_A6000,A10,A10g,A40,L4,L40,L40S,A100_PCIE,A100_SXM4,A100X,A800_PCIE,H100_PCIE,H100_SXM,H100_NVL,H200,H200_NVL,B200] num_gpus=1 gpu_ram>=16 verified=true rentable=true rented=false direct_port_count>=1 reliability>0.98 inet_down>200 cuda_vers>=12.8 dph_total<=0.80'
             Order = 'dph_total'
             Limit = 25
             MaxHourlyUsd = 0.80

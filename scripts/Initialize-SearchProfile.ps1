@@ -18,7 +18,46 @@ param(
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
 $script:InvariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
-$supportedGpus = @('RTX_4090', 'RTX_3090', 'RTX_A5000', 'A40', 'L40S')
+$gpuGroups = [ordered]@{
+    Consumer = [ordered]@{
+        Label = 'GeForce RTX（30/40/50 系列）'
+        Gpus = @(
+            'RTX_3090', 'RTX_3090_Ti',
+            'RTX_4060_Ti', 'RTX_4070', 'RTX_4070S', 'RTX_4070_Ti', 'RTX_4070S_Ti',
+            'RTX_4080', 'RTX_4080S', 'RTX_4090', 'RTX_4090D',
+            'RTX_5060_Ti', 'RTX_5070', 'RTX_5070_Ti', 'RTX_5080', 'RTX_5090'
+        )
+    }
+    AdaPro = [ordered]@{
+        Label = 'RTX Ada / RTX PRO 工作站系列'
+        Gpus = @(
+            'RTX_2000Ada', 'RTX_4000Ada', 'RTX_4500Ada', 'RTX_5000Ada', 'RTX_5880Ada', 'RTX_6000Ada',
+            'RTX_PRO_4000', 'RTX_PRO_4500', 'RTX_PRO_5000', 'RTX_PRO_6000_S', 'RTX_PRO_6000_WS'
+        )
+    }
+    RtxA = [ordered]@{
+        Label = 'RTX A 工作站系列'
+        Gpus = @('RTX_A2000', 'RTX_A4000', 'RTX_A4500', 'RTX_A5000', 'RTX_A6000')
+    }
+    DataCenter = [ordered]@{
+        Label = '现代数据中心系列'
+        Gpus = @(
+            'A10', 'A10g', 'A40', 'L4', 'L40', 'L40S',
+            'A100_PCIE', 'A100_SXM4', 'A100X', 'A800_PCIE',
+            'H100_PCIE', 'H100_SXM', 'H100_NVL', 'H200', 'H200_NVL', 'B200'
+        )
+    }
+}
+$supportedGpus = @($gpuGroups.Keys | ForEach-Object { $gpuGroups[$_].Gpus } | Select-Object -Unique)
+$recommendedGpus = @(
+    'RTX_3090', 'RTX_3090_Ti', 'RTX_4080', 'RTX_4080S', 'RTX_4090', 'RTX_4090D', 'RTX_5080', 'RTX_5090',
+    'RTX_4000Ada', 'RTX_4500Ada', 'RTX_5000Ada', 'RTX_5880Ada', 'RTX_6000Ada',
+    'RTX_PRO_4000', 'RTX_PRO_4500', 'RTX_PRO_5000', 'RTX_PRO_6000_S', 'RTX_PRO_6000_WS',
+    'RTX_A4000', 'RTX_A4500', 'RTX_A5000', 'RTX_A6000',
+    'A10', 'A10g', 'A40', 'L4', 'L40', 'L40S',
+    'A100_PCIE', 'A100_SXM4', 'A100X', 'A800_PCIE',
+    'H100_PCIE', 'H100_SXM', 'H100_NVL', 'H200', 'H200_NVL', 'B200'
+)
 
 function Write-WizardPage {
     param([int]$Page, [int]$Total, [string]$Title)
@@ -84,32 +123,80 @@ function Read-WizardYesNo {
 }
 
 function Read-GpuSelection {
-    param([string[]]$AvailableGpus)
+    param(
+        [System.Collections.IDictionary]$Groups,
+        [string[]]$Recommended,
+        [string[]]$AvailableGpus
+    )
 
-    for ($index = 0; $index -lt $AvailableGpus.Count; $index++) {
-        Write-Host ("  {0}. {1}" -f ($index + 1), $AvailableGpus[$index])
+    $presets = @(
+        [pscustomobject]@{ Label = '推荐的广泛兼容型号'; Gpus = $Recommended }
+        [pscustomobject]@{ Label = $Groups.Consumer.Label; Gpus = $Groups.Consumer.Gpus }
+        [pscustomobject]@{ Label = $Groups.AdaPro.Label; Gpus = $Groups.AdaPro.Gpus }
+        [pscustomobject]@{ Label = $Groups.RtxA.Label; Gpus = $Groups.RtxA.Gpus }
+        [pscustomobject]@{ Label = $Groups.DataCenter.Label; Gpus = $Groups.DataCenter.Gpus }
+        [pscustomobject]@{ Label = '全部支持型号'; Gpus = $AvailableGpus }
+    )
+    for ($index = 0; $index -lt $presets.Count; $index++) {
+        $suffix = if ($index -eq 0) { '（推荐/默认）' } else { '' }
+        Write-Host ("  {0}. {1}（{2} 种）{3}" -f ($index + 1), $presets[$index].Label, @($presets[$index].Gpus).Count, $suffix)
     }
-    Write-Host '直接回车表示全部；也可以输入逗号分隔的编号，例如 1,2,4。'
+    Write-Host '  7. 按具体型号逐项选择'
+    Write-Host '可组合多个分类，例如 2,3,5；直接回车使用推荐范围。'
 
     while ($true) {
-        $value = (Read-Host '选择允许的 GPU [全部]').Trim()
-        if ([string]::IsNullOrWhiteSpace($value)) { return $AvailableGpus }
+        $value = (Read-Host '选择 GPU 分类 [1]').Trim()
+        if ([string]::IsNullOrWhiteSpace($value)) { return $Recommended }
 
         $indices = @()
         $valid = $true
         foreach ($part in ($value -split '[,，\s]+' | Where-Object { $_ })) {
             $parsed = 0
-            if (-not [int]::TryParse($part, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt $AvailableGpus.Count) {
+            if (-not [int]::TryParse($part, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt 7) {
                 $valid = $false
                 break
             }
             if ($indices -notcontains $parsed) { $indices += $parsed }
         }
-
-        if ($valid -and $indices.Count -gt 0) {
-            return @($indices | ForEach-Object { $AvailableGpus[$_ - 1] })
+        if (-not $valid -or $indices.Count -eq 0) {
+            Write-Warning 'GPU 分类编号无效，请重新选择。'
+            continue
         }
-        Write-Warning 'GPU 编号无效，请重新选择。'
+
+        if ($indices -contains 7) {
+            if ($indices.Count -ne 1) {
+                Write-Warning '逐项选择不能与分类编号组合。'
+                continue
+            }
+            for ($index = 0; $index -lt $AvailableGpus.Count; $index++) {
+                Write-Host ("  {0}. {1}" -f ($index + 1), $AvailableGpus[$index])
+            }
+            while ($true) {
+                $modelValue = (Read-Host '输入具体型号编号（逗号分隔）').Trim()
+                $modelIndices = @()
+                $modelValid = $true
+                foreach ($part in ($modelValue -split '[,，\s]+' | Where-Object { $_ })) {
+                    $parsed = 0
+                    if (-not [int]::TryParse($part, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt $AvailableGpus.Count) {
+                        $modelValid = $false
+                        break
+                    }
+                    if ($modelIndices -notcontains $parsed) { $modelIndices += $parsed }
+                }
+                if ($modelValid -and $modelIndices.Count -gt 0) {
+                    return @($modelIndices | ForEach-Object { $AvailableGpus[$_ - 1] })
+                }
+                Write-Warning '具体型号编号无效，请重新选择。'
+            }
+        }
+
+        $selected = @()
+        foreach ($index in $indices) {
+            foreach ($gpu in @($presets[$index - 1].Gpus)) {
+                if ($selected -notcontains $gpu) { $selected += $gpu }
+            }
+        }
+        return $selected
     }
 }
 
@@ -125,7 +212,9 @@ if (-not $UseDefaults) {
     Write-Host ("已选择：{0}" -f $Profile) -ForegroundColor Green
 
     Write-WizardPage -Page 2 -Total 4 -Title 'GPU 与预算'
-    if (-not $GpuNames -or $GpuNames.Count -eq 0) { $GpuNames = Read-GpuSelection -AvailableGpus $supportedGpus }
+    if (-not $GpuNames -or $GpuNames.Count -eq 0) {
+        $GpuNames = Read-GpuSelection -Groups $gpuGroups -Recommended $recommendedGpus -AvailableGpus $supportedGpus
+    }
     $MinGpuRamGb = Read-WizardNumber -Prompt '最低显存（GB）' -Default $MinGpuRamGb -Minimum 12 -Maximum 192
     $MaxHourlyUsd = Read-WizardNumber -Prompt '最高每小时价格（USD）' -Default $MaxHourlyUsd -Minimum 0.05 -Maximum 20
 
@@ -143,7 +232,7 @@ if (-not $UseDefaults) {
     }
 } else {
     if (-not $Profile) { $Profile = 'vast-comfy' }
-    if (-not $GpuNames -or $GpuNames.Count -eq 0) { $GpuNames = $supportedGpus }
+    if (-not $GpuNames -or $GpuNames.Count -eq 0) { $GpuNames = $recommendedGpus }
 }
 
 $unknownGpus = @($GpuNames | Where-Object { $_ -notin $supportedGpus })
