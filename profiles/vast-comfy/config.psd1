@@ -1,31 +1,27 @@
 @{
-    # Secrets are never stored in this file. Initialize-Vast.ps1 reads this
-    # environment variable and writes the key to Vast CLI's user config.
+    # This profile is independent from the root base-image profile. It uses
+    # separate state files, labels, upload paths, volume names, and local port.
     Secrets = @{
         VastApiKeyEnvironmentVariable = 'VAST_API_KEY'
-        # Optional: only used if you later choose Codex API-key login manually.
-        # The deployment scripts never upload this secret to Vast.
         OpenAIApiKeyEnvironmentVariable = 'OPENAI_API_KEY'
-        # Current Anima files are public, so this is normally unnecessary.
         HuggingFaceTokenEnvironmentVariable = 'HF_TOKEN'
     }
 
     Vast = @{
         Cli = 'vastai'
 
-        # Every deployment re-runs this stored scope. Vast query syntax uses
-        # underscores in GPU names and '-' after an order field for descending.
         Search = @{
             Query = 'gpu_name in [RTX_4090,RTX_3090,RTX_A5000,A40,L40S] num_gpus=1 gpu_ram>=16 verified=true rentable=true rented=false direct_port_count>=1 reliability>0.98 inet_down>200 cuda_vers>=12.8 dph_total<=0.80'
             Order = 'dph_total'
             Limit = 25
             MaxHourlyUsd = 0.80
-            LastSearchPath = 'state/last-search.json'
+            LastSearchPath = 'profiles/vast-comfy/state/last-search.json'
         }
 
         Instance = @{
-            Label = 'anima-comfyui-example'
-            Image = 'vastai/base-image:cuda-12.8.1-cudnn-devel-ubuntu22.04-py310'
+            Label = 'anima-comfyui-preinstalled'
+            # Pin the complete tag. Upgrade Image and ComfyUI.Ref together.
+            Image = 'vastai/comfy:v0.28.0-cuda-12.9-py312'
             ContainerDiskGb = 30
             DirectSsh = $true
             WaitTimeoutSeconds = 900
@@ -34,17 +30,15 @@
                 TZ = 'Asia/Shanghai'
                 ENABLE_AUTH = 'true'
                 ENABLE_HTTPS = 'true'
+                COMFYUI_ARGS = '--disable-auto-launch --enable-cors-header --listen 127.0.0.1 --port 18188'
             }
         }
 
         Volume = @{
             Enabled = $true
             SizeGb = 80
-            LabelPrefix = 'anima_comfyui'
+            LabelPrefix = 'anima_comfy_preinstalled'
             MountPath = '/workspace'
-
-            # {machine_id} and {size_gb} are replaced after a GPU offer is
-            # selected. This keeps the volume on the same physical machine.
             SearchQueryTemplate = 'machine_id={machine_id} disk_space>={size_gb} verified=true reliability>0.98'
             SearchOrder = 'storage_cost'
             SearchLimit = 10
@@ -55,21 +49,22 @@
             IdentityFile = ''
             StrictHostKeyChecking = 'accept-new'
             ConnectTimeoutSeconds = 15
-            LocalComfyPort = 18188
+            # The root profile uses 18188, so both tunnels can run together.
+            LocalComfyPort = 28188
         }
     }
 
     ComfyUI = @{
-        InstallationMode = 'managed'
-        Repository = 'https://github.com/comfyanonymous/ComfyUI.git'
-        Ref = 'master'
+        InstallationMode = 'preinstalled'
+        Repository = 'https://github.com/Comfy-Org/ComfyUI.git'
+        Ref = 'v0.28.0'
         Root = '/workspace/ComfyUI'
         Python = '/venv/main/bin/python'
         Uv = '/venv/main/bin/uv'
         ListenHost = '127.0.0.1'
         Port = 18188
         ServiceName = 'comfyui'
-        LogPath = '/workspace/logs/comfyui.log'
+        LogPath = '/var/log/portal/comfyui.log'
         ExtraArgs = @()
     }
 
@@ -82,13 +77,13 @@
                 Name = 'anima-base-v1.0.safetensors'
                 Folder = 'diffusion_models'
                 Url = 'https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/diffusion_models/anima-base-v1.0.safetensors'
-                Sha256 = ''
+                Sha256 = 'bd43b7cffe1ed1153d9c41e7beb2f18cb1273eafbaa3af3edd6a173dc90a006e'
             },
             @{
                 Name = 'qwen_3_06b_base.safetensors'
                 Folder = 'text_encoders'
                 Url = 'https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/text_encoders/qwen_3_06b_base.safetensors'
-                Sha256 = ''
+                Sha256 = 'cd2a512003e2f9f3cd3c32a9c3573f820bb28c940f73c57b1ddaa983d9223eba'
             },
             @{
                 Name = 'qwen_image_vae.safetensors'
@@ -119,16 +114,14 @@
         ApiKeyEnvironmentVariable = 'OPENAI_API_KEY'
         ApprovalPolicy = 'on-request'
         SandboxMode = 'workspace-write'
-        # Empty means use the current Codex default/model picker rather than
-        # pinning a model name that can become stale.
         Model = ''
     }
 
     Local = @{
-        StatePath = 'state/deployment.json'
-        GeneratedRemoteConfigPath = 'state/remote-config.json'
-        RemoteUploadDirectory = '/tmp/anima-vast-deploy'
-        ProvisionScriptPath = 'remote/provision.sh'
+        StatePath = 'profiles/vast-comfy/state/deployment.json'
+        GeneratedRemoteConfigPath = 'profiles/vast-comfy/state/remote-config.json'
+        RemoteUploadDirectory = '/tmp/anima-vast-comfy-deploy'
+        ProvisionScriptPath = 'profiles/vast-comfy/remote/provision.sh'
         CodexScriptPath = 'remote/configure-codex.sh'
     }
 }

@@ -12,4 +12,4 @@ if (-not $ConfigPath) { $ConfigPath = Join-Path (Resolve-Path (Join-Path $PSScri
 
 Write-Host ''
 Write-Host 'Deployment and provisioning completed.' -ForegroundColor Green
-Write-Host 'Run .\scripts\Open-ComfyUITunnel.ps1, then open the printed local URL.'
+Write-Host 'Return to Start-VastAnima.ps1 and choose the ComfyUI tunnel, or run it with -Action Tunnel.'

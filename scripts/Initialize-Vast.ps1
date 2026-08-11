@@ -25,9 +25,9 @@ if ($null -eq $ApiKey) {
 $credential = New-Object System.Management.Automation.PSCredential('vast', $ApiKey)
 $plainKey = $credential.GetNetworkCredential().Password
 try {
-    $output = & $cli set api-key $plainKey 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "vastai set api-key failed: $($output -join "`n")"
+    $result = Invoke-NativeCommandCapture -Command $cli -Arguments @('set', 'api-key', $plainKey)
+    if ($result.ExitCode -ne 0) {
+        throw "vastai set api-key failed: $($result.Text)"
     }
 }
 finally {

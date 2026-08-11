@@ -20,7 +20,7 @@ $response = Invoke-VastJson -Config $config -Arguments @(
 )
 $offers = @(ConvertTo-ObjectArray -Value $response -CandidateProperties @('offers'))
 if ($offers.Count -eq 0) {
-    throw 'No Vast offers matched the stored search scope. Edit Vast.Search.Query in config.psd1 deliberately before retrying.'
+    throw 'No Vast offers matched the stored search scope. Run Start-VastAnima.ps1 -Action Configure to adjust it deliberately.'
 }
 
 $record = [ordered]@{

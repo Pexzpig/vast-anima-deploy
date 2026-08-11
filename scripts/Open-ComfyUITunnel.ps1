@@ -13,5 +13,8 @@ $localPort = [int]$config.Vast.Ssh.LocalComfyPort
 $remotePort = [int]$config.ComfyUI.Port
 
 Write-Host "Opening SSH tunnel. Keep this terminal open, then browse http://127.0.0.1:$localPort" -ForegroundColor Green
-& ssh @common -p $endpoint.Port -N -L "${localPort}:127.0.0.1:${remotePort}" "$($endpoint.User)@$($endpoint.Host)"
-if ($LASTEXITCODE -ne 0) { throw "SSH tunnel exited with code $LASTEXITCODE." }
+Invoke-NativeCommandChecked -Command 'ssh' -Arguments ($common + @(
+    '-p', [string]$endpoint.Port,
+    '-N', '-L', "${localPort}:127.0.0.1:${remotePort}",
+    "$($endpoint.User)@$($endpoint.Host)"
+)) -FailureMessage 'SSH tunnel failed.'

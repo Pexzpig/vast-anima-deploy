@@ -12,13 +12,57 @@ function Resolve-ProjectPath {
     return [System.IO.Path]::GetFullPath((Join-Path $script:ProjectRoot $Path))
 }
 
+function ConvertTo-HashtableDeep {
+    param(
+        [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
+        $InputObject
+    )
+
+    process {
+        if ($null -eq $InputObject) { return $null }
+
+        if ($InputObject -is [System.Collections.IDictionary]) {
+            $result = @{}
+            foreach ($key in $InputObject.Keys) {
+                $result[[string]$key] = ConvertTo-HashtableDeep -InputObject $InputObject[$key]
+            }
+            return $result
+        }
+
+        if ($InputObject -is [pscustomobject]) {
+            $result = @{}
+            foreach ($property in $InputObject.PSObject.Properties) {
+                $result[$property.Name] = ConvertTo-HashtableDeep -InputObject $property.Value
+            }
+            return $result
+        }
+
+        if (($InputObject -is [System.Collections.IEnumerable]) -and -not ($InputObject -is [string])) {
+            $items = @()
+            foreach ($item in $InputObject) {
+                $items += ,(ConvertTo-HashtableDeep -InputObject $item)
+            }
+            return ,$items
+        }
+
+        return $InputObject
+    }
+}
+
 function Get-DeployConfig {
     param([string]$ConfigPath = (Join-Path $script:ProjectRoot 'config.psd1'))
 
-    if (-not (Test-Path -LiteralPath $ConfigPath)) {
-        throw "Configuration not found: $ConfigPath. Restore or create config.psd1 before continuing."
+    $resolvedPath = Resolve-ProjectPath -Path $ConfigPath
+    if (-not (Test-Path -LiteralPath $resolvedPath)) {
+        throw "Configuration not found: $resolvedPath. Restore or create config.psd1 before continuing."
     }
-    return Import-PowerShellDataFile -LiteralPath $ConfigPath
+
+    if ([System.IO.Path]::GetExtension($resolvedPath) -ieq '.json') {
+        $json = Get-Content -LiteralPath $resolvedPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return ConvertTo-HashtableDeep -InputObject $json
+    }
+
+    return Import-PowerShellDataFile -LiteralPath $resolvedPath
 }
 
 function Assert-CommandExists {
@@ -27,6 +71,66 @@ function Assert-CommandExists {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         throw "Required command '$Name' was not found in PATH."
     }
+}
+
+function Invoke-NativeCommandCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [string[]]$Arguments = @()
+    )
+
+    Assert-CommandExists -Name $Command
+
+    # Windows PowerShell 5.1 turns native stderr into non-terminating
+    # NativeCommandError records. With the project-wide Stop preference those
+    # records would terminate execution before callers can inspect EXITCODE.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $rawOutput = @(& $Command @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    $output = @($rawOutput | ForEach-Object { $_.ToString() })
+    return [pscustomobject]@{
+        ExitCode = [int]$exitCode
+        Output = $output
+        Text = ($output -join "`n").Trim()
+    }
+}
+
+function Invoke-NativeCommandChecked {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [string[]]$Arguments = @(),
+        [Parameter(Mandatory = $true)][string]$FailureMessage
+    )
+
+    Assert-CommandExists -Name $Command
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $Command @Arguments 2>&1 | ForEach-Object { Write-Host ($_.ToString()) }
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($exitCode -ne 0) {
+        throw "$FailureMessage Native command exited with code $exitCode."
+    }
+}
+
+function Test-VastAuthentication {
+    param([Parameter(Mandatory = $true)][string]$CliPath)
+
+    $result = Invoke-NativeCommandCapture -Command $CliPath -Arguments @('show', 'user', '--raw')
+    return ($result.ExitCode -eq 0)
 }
 
 function ConvertFrom-LooseJson {
@@ -57,11 +161,11 @@ function Invoke-VastText {
 
     $cli = [string]$Config.Vast.Cli
     Assert-CommandExists -Name $cli
-    $output = & $cli @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Vast CLI failed ($LASTEXITCODE): $cli $($Arguments -join ' ')`n$($output -join "`n")"
+    $result = Invoke-NativeCommandCapture -Command $cli -Arguments $Arguments
+    if ($result.ExitCode -ne 0) {
+        throw "Vast CLI failed ($($result.ExitCode)): $cli $($Arguments -join ' ')`n$($result.Text)"
     }
-    return ($output -join "`n").Trim()
+    return $result.Text
 }
 
 function Invoke-VastJson {

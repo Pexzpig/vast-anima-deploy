@@ -1,277 +1,184 @@
-# Vast.ai + ComfyUI + Anima + Codex CLI 示例部署
+# Vast.ai + ComfyUI + Anima 自动部署
 
-这是一套面向 Windows 本地控制端和 Vast.ai Linux GPU 实例的示例脚本。
-
-它完成以下流程：
-
-1. 从 `config.psd1` 读取固定的 GPU 搜索范围；
-2. 每次部署都重新执行该范围，不静默扩大搜索条件；
-3. 为候选 GPU 查找同一 `machine_id` 上的本地卷；
-4. 创建卷和 SSH 实例，并把 ID 写入 `state/deployment.json`；
-5. 通过 SSH 安装 ComfyUI、Anima Base v1 官方模型和官方 workflow；
-6. 让 ComfyUI 只监听远端 `127.0.0.1:18188`，通过 SSH 隧道访问；
-7. 安装 Codex CLI，但不自动上传或持久化 OpenAI 凭据；
-8. 提供启动、暂停、销毁实例和删除卷脚本。
-
-Vast 会对实例和存储计费。`New-VastDeployment.ps1` 默认要求输入 `RENT`，销毁和删除操作也有独立确认；自动化时才使用 `-Force`。
-
-## 目录
-
-```text
-vast-anima-deploy/
-├── config.psd1               # 完整配置，不包含密钥
-├── remote/
-│   ├── provision.sh          # 远端 ComfyUI/Anima 配置
-│   └── configure-codex.sh    # 远端 Codex 配置
-├── scripts/
-│   ├── Initialize-Vast.ps1
-│   ├── Test-Configuration.ps1
-│   ├── Search-VastOffers.ps1
-│   ├── New-VastDeployment.ps1
-│   ├── Provision-Instance.ps1
-│   ├── Deploy-Example.ps1
-│   ├── Open-ComfyUITunnel.ps1
-│   ├── Get-DeploymentStatus.ps1
-│   ├── Start-VastInstance.ps1
-│   ├── Stop-VastInstance.ps1
-│   ├── Destroy-VastInstance.ps1
-│   └── Remove-VastVolume.ps1
-└── state/                    # 搜索结果和当前部署 ID；被 Git 忽略
-```
-
-## 1. 本地前置条件
-
-- Windows PowerShell 5.1 或 PowerShell 7；
-- Python 3；
-- OpenSSH 的 `ssh` 和 `scp`；
-- Vast.ai 账户、余额、API key 和已注册的 SSH 公钥。
-
-如果系统阻止本地 `.ps1`，只对当前 PowerShell 进程临时放行：
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-```
-
-安装 Vast CLI：
-
-```powershell
-py -m pip install --upgrade vastai
-vastai --help
-```
-
-如果 SSH 公钥尚未注册：
-
-```powershell
-vastai create ssh-key "$HOME\.ssh\id_ed25519.pub"
-```
-
-Vast 官方 CLI 指南：<https://docs.vast.ai/cli/hello-world>
-
-## 2. 创建并检查配置
+这套脚本从 Windows 终端自动完成 Vast.ai 环境检测、首次参数初始化、GPU 报价搜索、实例/持久卷创建、Anima 配置和 ComfyUI SSH 隧道管理。日常使用只有一个入口，不需要自己输入 `vastai` 命令，也不用在两套 profile 脚本之间手工切换。
 
 ```powershell
 Set-Location E:\Documents\img1\vast-anima-deploy
-notepad .\config.psd1
-.\scripts\Test-Configuration.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Start-VastAnima.ps1
 ```
 
-重点确认：
+Vast.ai 会对实例和存储计费。脚本只会在创建付费资源、销毁实例、永久删除持久卷、安装缺失组件或收集缺失凭据时要求用户确认/输入；检测、搜索、选择首个合格报价、部署和状态路由均自动完成。
 
-- `Vast.Search.Query`：允许的 GPU、显存、可靠性、网络、CUDA 和最高时价；
-- `Vast.Search.MaxHourlyUsd`：脚本侧的第二道价格上限；
-- `Vast.Instance.Image`：示例使用 Vast 官方 base-image；
-- `Vast.Volume.SizeGb`：模型、环境、workflow 和输出的持久卷容量；
-- `Vast.Ssh.IdentityFile`：留空使用系统默认 SSH key；
-- `ComfyUI.Port` 与 `Vast.Ssh.LocalComfyPort`；
-- `Anima.Models`：官方 Base、Qwen 文本编码器和 Qwen Image VAE；
-- `Codex.ApprovalPolicy` 与 `Codex.SandboxMode`。
+## 首次运行
 
-默认搜索范围只接受单卡、16GB 以上显存、Vast 已验证、可靠性高于 0.98、下载带宽大于 200Mbps、CUDA 12.8+、价格不高于 0.80 美元/小时的指定 GPU。它只是保守示例，应按账户所在地和市场供给主动修改。
+第一次运行 `Start-VastAnima.ps1` 会依次完成：
 
-配置中的密钥字段保存的是“环境变量名称”，不是密钥本身：
+1. 检查 PowerShell、OpenSSH、Python 和 Vast CLI；
+2. Vast CLI 缺失时询问一次，然后通过 Python/pip 自动安装；
+3. 检查 Vast.ai 登录状态；未登录时安全读取 API key，并交给 Vast CLI 保存；
+4. 检查本机 SSH 公钥；缺失时询问一次并生成 Ed25519 密钥；
+5. 检查 Vast.ai 账户的 SSH 公钥，必要时自动注册；
+6. 在四页 CLI 向导中初始化部署和搜索参数；
+7. 生成本地用户配置，最后询问是否立即搜索并部署。
 
-| 配置键 | 默认环境变量 | 是否必需 |
-|---|---|---|
-| `Secrets.VastApiKeyEnvironmentVariable` | `VAST_API_KEY` | 本地初始化 Vast CLI 时必需 |
-| `Secrets.OpenAIApiKeyEnvironmentVariable` | `OPENAI_API_KEY` | 可选；Codex 默认用设备码登录 |
-| `Secrets.HuggingFaceTokenEnvironmentVariable` | `HF_TOKEN` | 当前公开 Anima 文件不需要 |
+API key 不写入仓库或生成的 JSON。环境中已设置 `VAST_API_KEY` 时，认证脚本会直接使用它。
 
-## 3. 初始化 Vast CLI 身份
+### CLI 参数向导
 
-不要把 API key 写入 `config.psd1`。直接运行脚本，它会使用安全输入框询问：
+向导不要求用户了解 Vast 查询语法，只需选择或输入：
 
-```powershell
-.\scripts\Initialize-Vast.ps1
-```
+- 部署配置：`vastai/comfy` 预装镜像或基础镜像；
+- 允许的 GPU 型号；
+- 最低显存和最高每小时 GPU 价格；
+- 最低可靠度、下载速度和 CUDA 版本；
+- 搜索结果上限；
+- 是否启用持久卷及卷大小。
 
-`Initialize-Vast.ps1` 调用 Vast CLI 的 `set api-key`，将凭据保存到 Vast CLI 的用户配置位置。CI 场景也可以事先设置 `VAST_API_KEY` 环境变量，但不要在终端历史、日志或仓库中记录值。
+脚本会把选择转换为受限的 `Vast.Search.Query`。每次部署仍会重新搜索，不会复用过时报价，也不会静默放宽预算、GPU、可靠度或网络条件。
 
-## 4. 只搜索，不租用
-
-```powershell
-.\scripts\Search-VastOffers.ps1
-```
-
-结果保存到 `state/last-search.json`。部署脚本不会直接复用旧报价；它会再次调用该搜索脚本。
-
-Vast 搜索语法和字段：<https://docs.vast.ai/cli/reference/search-instances>
-
-## 5. 完整示例部署
-
-```powershell
-.\scripts\Deploy-Example.ps1
-```
-
-流程中会显示候选 GPU、时价和卷信息，并要求输入 `RENT`。它依次执行：
-
-- `New-VastDeployment.ps1`：重新搜索、创建同机卷、创建实例、等待 SSH；
-- `Provision-Instance.ps1`：上传非敏感配置和远端脚本，安装并验证服务。
-
-无人值守场景可使用：
-
-```powershell
-.\scripts\Deploy-Example.ps1 -Force
-```
-
-远端安装内容：
-
-- `/workspace/ComfyUI`；
-- `/workspace/ComfyUI/models/diffusion_models/anima-base-v1.0.safetensors`；
-- `/workspace/ComfyUI/models/text_encoders/qwen_3_06b_base.safetensors`；
-- `/workspace/ComfyUI/models/vae/qwen_image_vae.safetensors`；
-- `/workspace/anima-project/workflows/original/image_anima_base_v1.json`；
-- `/workspace/anima-project/records/anima-baseline.json`；
-- Supervisor 服务 `comfyui`；
-- Codex CLI 和项目级 `.codex/config.toml`。
-
-- Anima 官方模型卡：<https://huggingface.co/circlestone-labs/Anima>
-- ComfyUI 官方 Anima workflow：<https://github.com/Comfy-Org/workflow_templates/blob/main/templates/image_anima_base_v1.json>
-
-## 6. 打开 ComfyUI
-
-```powershell
-.\scripts\Open-ComfyUITunnel.ps1
-```
-
-保持终端打开，然后访问：
+向导生成的本地文件为：
 
 ```text
-http://127.0.0.1:18188
+user-config/
+├── launcher.json          # 当前 profile 和配置路径
+├── vast-comfy.json        # 预装镜像的用户参数（选择该 profile 时）
+├── base-image.json        # 基础镜像的用户参数（选择该 profile 时）
+└── environment.json       # 已注册 SSH 公钥的本地标记
 ```
 
-远端 ComfyUI 不监听公网地址。关闭 SSH 隧道不会停止 ComfyUI 或实例。
+这些 JSON 已被 Git 忽略。它们不含 API key，但可能包含本机 SSH 公钥路径。
 
-## 7. Codex 登录和运行
+## 日常使用
 
-先使用状态脚本查看 SSH 地址：
+直接运行入口脚本，按菜单编号操作：
 
 ```powershell
-.\scripts\Get-DeploymentStatus.ps1
+.\Start-VastAnima.ps1
 ```
 
-SSH 登录实例后：
+菜单统一提供：
+
+- 自动搜索并部署；
+- 查看报价和部署状态；
+- 打开 ComfyUI SSH 隧道；
+- 重新执行远端配置；
+- 启动、停止、销毁实例；
+- 修改搜索参数或切换部署配置；
+- 永久删除持久卷。
+
+也可以指定单个动作，仍不需要调用 `vastai`：
+
+```powershell
+.\Start-VastAnima.ps1 -Action Search
+.\Start-VastAnima.ps1 -Action Deploy
+.\Start-VastAnima.ps1 -Action Status
+.\Start-VastAnima.ps1 -Action Tunnel
+.\Start-VastAnima.ps1 -Action Stop
+.\Start-VastAnima.ps1 -Action Start
+.\Start-VastAnima.ps1 -Action Configure
+.\Start-VastAnima.ps1 -Action SwitchProfile
+```
+
+`Deploy` 会先校验配置并显示合格报价，再展示镜像、GPU 时价上限和持久卷提示。用户确认后，脚本自动选择当前搜索结果中第一个同时满足预算和卷条件的报价，创建资源并完成 provision。
+
+`Destroy` 和 `RemoveVolume` 分开确认。销毁实例不会自动删除单独创建的持久卷；停止实例后，实例磁盘和卷仍会产生存储费用。
+
+## 两套独立部署配置
+
+| 项目 | `vast-comfy`（默认推荐） | `base-image` |
+|---|---|---|
+| 镜像 | `vastai/comfy:v0.28.0-cuda-12.9-py312` | `vastai/base-image:cuda-12.8.1-cudnn-devel-ubuntu22.04-py310` |
+| ComfyUI | 镜像预装，校验为 `v0.28.0` | provision 时克隆和安装 |
+| 状态目录 | `profiles/vast-comfy/state/` | `state/` |
+| 实例标签 | `anima-comfyui-preinstalled` | `anima-comfyui-example` |
+| 卷前缀 | `anima_comfy_preinstalled` | `anima_comfyui` |
+| 本地隧道 | `127.0.0.1:28188` | `127.0.0.1:18188` |
+| 适合 | 更快启动、固定版本、较少安装步骤 | 修改源码、跟踪分支、深度定制 |
+
+两套配置的 state、实例标签、卷标签、远端 provision 路径和本地端口互相独立，可以各自部署和管理。菜单中的“切换部署配置”只切换当前操作对象，不会停止、销毁或迁移另一套配置的资源；目标配置已有用户 JSON 时直接切换并保留原参数，尚未初始化时才打开一次参数向导。
+
+预装版本会验证镜像中的 ComfyUI checkout 和 CUDA PyTorch，不会重新安装 ComfyUI、PyTorch、基础 requirements 或覆盖镜像自带的 Supervisor 配置。它只配置 Anima 模型、官方 workflow、基线记录和 Codex，然后重启并健康检查服务。
+
+升级预装镜像时必须同步修改：
+
+```text
+Vast.Instance.Image = vastai/comfy:<version>-<cuda>-<python>
+ComfyUI.Ref         = <version>
+```
+
+`/workspace` 使用持久卷时，旧卷可能保留旧版 ComfyUI。升级建议先备份 workflow、输出和自定义节点，再使用新卷，避免脚本静默覆盖已有环境。
+
+## 自动部署的远端内容
+
+- `/workspace/ComfyUI`；
+- Anima Base v1 diffusion model；
+- Qwen 3 0.6B text encoder；
+- Qwen Image VAE；
+- `/workspace/anima-project/workflows/original/image_anima_base_v1.json`；
+- `/workspace/anima-project/records/anima-baseline.json`；
+- Supervisor `comfyui` 服务；
+- Codex CLI 和项目级 `.codex/config.toml`。
+
+模型和 workflow 使用固定 URL；已配置 SHA-256 的文件会校验哈希，其他文件至少要求下载成功且非空。已验证的模型不会重复下载，下载中断后重新选择菜单中的“重新执行配置部署”即可续传。
+
+相关上游资料：
+
+- [Vast.ai 创建 SSH key](https://docs.vast.ai/cli/reference/create-ssh-key)
+- [Vast.ai 搜索报价](https://docs.vast.ai/cli/reference/search-instances)
+- [Vast.ai 创建实例](https://docs.vast.ai/cli/reference/create-instance)
+- [vastai/comfy Docker 镜像](https://hub.docker.com/r/vastai/comfy/)
+- [Anima 官方模型卡](https://huggingface.co/circlestone-labs/Anima)
+- [ComfyUI 官方 Anima workflow](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/image_anima_base_v1.json)
+
+## 打开 ComfyUI
+
+选择菜单中的“打开 ComfyUI SSH 隧道”，保持该终端运行，然后访问终端显示的地址：
+
+- 预装 profile：`http://127.0.0.1:28188`
+- 基础镜像 profile：`http://127.0.0.1:18188`
+
+ComfyUI 在远端只监听 `127.0.0.1:18188`，不直接暴露到公网。关闭 SSH 隧道不会停止实例。
+
+## Codex 登录
+
+部署不会上传或持久化 OpenAI 凭据。SSH 登录实例后再运行：
 
 ```bash
 /workspace/bin/codex-login.sh
 /workspace/bin/run-codex.sh
 ```
 
-登录脚本使用 `codex login --device-auth`。在本地浏览器打开终端给出的地址并输入一次性代码。Codex 的认证文件保留在实例容器的 root home，而不是 `/workspace` 持久卷。
+默认使用设备码登录。认证文件位于实例容器的 root home，不放在 `/workspace` 持久卷中。
 
-如必须使用 API key，应在远端交互式终端通过 stdin 登录，不要把 key 放到 Vast 模板、workflow、Git 或本项目配置中：
+## 恢复和计费边界
 
-```bash
-read -rsp 'OpenAI API key: ' OPENAI_API_KEY
-printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
-unset OPENAI_API_KEY
+- provision 失败时脚本不会自动销毁付费资源，以免误删数据；入口菜单会保留状态，可选择重试、停止或销毁；
+- 卷已创建而实例创建失败时，卷 ID 仍写入 deployment state，可在销毁实例后单独删除；
+- 新部署不会覆盖仍指向活动实例或保留卷的 state；
+- Vast 本地卷绑定物理机器，不是跨机器高可用存储，重要输出仍应另行备份；
+- 实例停止后恢复受原机器 GPU 可用性影响；
+- 当前 Anima 模型卡标注非商业许可证，商业使用前应自行核对完整条款。
+
+## 高级入口
+
+`scripts/` 和 `profiles/vast-comfy/Invoke-Profile.ps1` 保留为调试与自动化构件。正常使用只运行 `Start-VastAnima.ps1`；直接调用底层带 `-Force` 的创建/销毁脚本会绕过统一入口的中文确认，不建议用于交互操作。
+
+目录结构：
+
+```text
+vast-anima-deploy/
+├── Start-VastAnima.ps1
+├── config.psd1
+├── user-config/
+├── remote/
+├── profiles/vast-comfy/
+│   ├── config.psd1
+│   ├── Invoke-Profile.ps1
+│   ├── remote/provision.sh
+│   └── state/
+├── scripts/
+│   ├── Initialize-Environment.ps1
+│   ├── Initialize-SearchProfile.ps1
+│   └── ...
+└── state/
 ```
-
-Codex 官方安装和 headless 认证：
-
-- <https://developers.openai.com/codex/cli/>
-- <https://developers.openai.com/codex/auth/>
-
-## 8. 实例生命周期
-
-查看状态：
-
-```powershell
-.\scripts\Get-DeploymentStatus.ps1
-```
-
-暂停计算：
-
-```powershell
-.\scripts\Stop-VastInstance.ps1
-```
-
-暂停会停止计算计费，但实例磁盘和卷的存储费用继续产生。
-
-重新启动：
-
-```powershell
-.\scripts\Start-VastInstance.ps1
-```
-
-Vast 不保证原机器 GPU 在恢复时仍有空闲资源；脚本会等待并报告终止状态或超时。
-
-永久销毁实例：
-
-```powershell
-.\scripts\Destroy-VastInstance.ps1
-# 自动化：.\scripts\Destroy-VastInstance.ps1 -Force
-```
-
-单独创建的卷不会随实例销毁而删除。
-
-永久删除卷：
-
-```powershell
-.\scripts\Remove-VastVolume.ps1
-# 自动化：.\scripts\Remove-VastVolume.ps1 -Force
-```
-
-Vast 要求先销毁所有挂载该卷的实例。卷删除不可恢复。
-
-生命周期命令参考：
-
-- <https://docs.vast.ai/cli/reference/start-instance>
-- <https://docs.vast.ai/cli/reference/stop-instance>
-- <https://docs.vast.ai/cli/reference/destroy-instance>
-- <https://docs.vast.ai/cli/reference/delete-volume>
-
-## 9. 幂等性和恢复边界
-
-- 已存在且校验通过的模型不会重新下载；
-- 原始 workflow 存在时不会覆盖；
-- 已有 ComfyUI Git checkout 只允许 fast-forward 更新，不丢弃本地改动；
-- 写 Codex 项目配置前会创建带 UTC 时间戳的备份；
-- 远端配置失败时，付费资源不会被脚本自动销毁，避免误删数据；应检查状态后主动决定暂停、销毁或重试配置；
-- 若实例创建失败但卷已创建，卷 ID 会保留在 `state/deployment.json`，可以单独删除；
-- 新部署不会覆盖仍指向活动实例或保留卷的 state，防止付费资源被遗忘；
-- Vast 本地卷绑定物理机器，不是跨机器高可用存储。重要 workflow 和输出仍需复制到本地或对象存储。
-
-## 10. 常见问题
-
-### 搜索不到同时支持卷的 GPU
-
-脚本会依次尝试当前搜索结果，寻找同一 `machine_id` 的卷报价。可以在 `config.psd1` 中明确调整 GPU 范围、价格、可靠性或关闭 `Vast.Volume.Enabled`；不要在脚本里绕过配置范围。
-
-### ComfyUI 配置失败
-
-SSH 登录后查看：
-
-```bash
-supervisorctl status comfyui
-tail -n 100 /workspace/logs/comfyui.log
-nvidia-smi
-curl http://127.0.0.1:18188/system_stats
-```
-
-### 模型下载中断
-
-重新执行 `Provision-Instance.ps1`。远端下载使用可续传的 `.part` 文件。VAE 配置了官方 SHA-256；其余大文件在配置未提供校验值时至少要求下载成功且文件非空。
-
-### Anima 商业使用
-
-当前 Hugging Face 模型页标注 CircleStone Labs 非商业许可证。部署脚本不会改变或替代模型许可证，商业使用前应单独核对完整条款。

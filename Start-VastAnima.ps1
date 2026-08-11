@@ -1,0 +1,235 @@
+﻿[CmdletBinding()]
+param(
+    [ValidateSet('Menu', 'Deploy', 'Search', 'Status', 'Tunnel', 'Provision', 'Start', 'Stop', 'Destroy', 'RemoveVolume', 'Configure', 'SwitchProfile', 'Test')]
+    [string]$Action = 'Menu'
+)
+
+$ErrorActionPreference = 'Stop'
+$projectRoot = $PSScriptRoot
+$scriptsRoot = Join-Path $projectRoot 'scripts'
+. (Join-Path $scriptsRoot 'Common.ps1')
+
+function Read-LauncherYesNo {
+    param([string]$Prompt, [bool]$Default = $false)
+
+    $hint = if ($Default) { 'Y/n' } else { 'y/N' }
+    while ($true) {
+        $answer = (Read-Host "$Prompt [$hint]").Trim().ToLowerInvariant()
+        if (-not $answer) { return $Default }
+        if ($answer -in @('y', 'yes', '是', '好')) { return $true }
+        if ($answer -in @('n', 'no', '否', '不')) { return $false }
+        Write-Warning '请输入 y 或 n。'
+    }
+}
+
+function Get-LauncherSelection {
+    $path = Resolve-ProjectPath -Path 'user-config/launcher.json'
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    return Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+
+function Switch-LauncherProfile {
+    param($CurrentSelection)
+
+    Write-Host ''
+    Write-Host '  1. vast-comfy（预装镜像，推荐）'
+    Write-Host '  2. base-image（完整安装，便于定制）'
+    while ($true) {
+        $choice = (Read-Host '请选择要切换到的配置').Trim()
+        if ($choice -in @('1', '2')) { break }
+        Write-Warning '请输入 1 或 2。'
+    }
+    $targetProfile = if ($choice -eq '1') { 'vast-comfy' } else { 'base-image' }
+    if ($CurrentSelection.profile -eq $targetProfile) {
+        Write-Host "当前已经是 $targetProfile。" -ForegroundColor Yellow
+        return
+    }
+
+    $relativeConfigPath = "user-config/$targetProfile.json"
+    if (Test-Path -LiteralPath (Resolve-ProjectPath -Path $relativeConfigPath)) {
+        Save-JsonFile -Path 'user-config/launcher.json' -Value ([ordered]@{
+            profile = $targetProfile
+            config_path = $relativeConfigPath
+            selected_at = (Get-Date).ToUniversalTime().ToString('o')
+        }) | Out-Null
+        Write-Host "已切换到 $targetProfile；已有搜索参数保持不变。" -ForegroundColor Green
+        return
+    }
+
+    Write-Host "$targetProfile 尚未初始化，接下来只需填写一次该配置的搜索参数。" -ForegroundColor Cyan
+    & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') -Profile $targetProfile -Force | Out-Host
+}
+
+function Get-LocalDeploymentSummary {
+    param([hashtable]$Config)
+
+    $statePath = Resolve-ProjectPath -Path ([string]$Config.Local.StatePath)
+    if (-not (Test-Path -LiteralPath $statePath)) {
+        return [pscustomobject]@{ Exists = $false; InstanceStatus = '未部署'; VolumeStatus = '无'; State = $null }
+    }
+    try {
+        $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return [pscustomobject]@{
+            Exists = $true
+            InstanceStatus = if ($state.instance_status) { [string]$state.instance_status } else { 'unknown' }
+            VolumeStatus = if ($state.volume_status) { [string]$state.volume_status } elseif ($state.volume_id) { 'created' } else { '无' }
+            State = $state
+        }
+    } catch {
+        throw "无法读取部署状态 $statePath：$($_.Exception.Message)"
+    }
+}
+
+function Show-LauncherMenu {
+    param($Selection, [hashtable]$Config, $Summary)
+
+    Write-Host ''
+    Write-Host ('=' * 68) -ForegroundColor DarkCyan
+    Write-Host ' Anima / ComfyUI · Vast.ai 自动部署' -ForegroundColor Cyan
+    Write-Host ('=' * 68) -ForegroundColor DarkCyan
+    Write-Host "当前配置：$($Selection.profile)"
+    Write-Host "镜像：$($Config.Vast.Instance.Image)"
+    Write-Host "实例：$($Summary.InstanceStatus)    持久卷：$($Summary.VolumeStatus)"
+    Write-Host ''
+    Write-Host '  1. 自动搜索并部署'
+    Write-Host '  2. 查看符合条件的报价'
+    Write-Host '  3. 查看部署状态'
+    Write-Host '  4. 打开 ComfyUI SSH 隧道'
+    Write-Host '  5. 重新执行配置部署'
+    Write-Host '  6. 启动实例'
+    Write-Host '  7. 停止实例'
+    Write-Host '  8. 修改搜索参数'
+    Write-Host '  9. 切换部署配置'
+    Write-Host ' 10. 检查配置'
+    Write-Host ' 11. 销毁实例'
+    Write-Host ' 12. 永久删除持久卷'
+    Write-Host '  0. 退出'
+
+    $mapping = @{
+        '1' = 'Deploy'; '2' = 'Search'; '3' = 'Status'; '4' = 'Tunnel'
+        '5' = 'Provision'; '6' = 'Start'; '7' = 'Stop'; '8' = 'Configure'
+        '9' = 'SwitchProfile'; '10' = 'Test'; '11' = 'Destroy'; '12' = 'RemoveVolume'
+        '0' = 'Exit'
+    }
+    while ($true) {
+        $choice = (Read-Host '请选择操作').Trim()
+        if ($mapping.ContainsKey($choice)) { return $mapping[$choice] }
+        Write-Warning '请输入菜单中的编号。'
+    }
+}
+
+function Invoke-LauncherOperation {
+    param([string]$Name, $Selection, [hashtable]$Config)
+
+    $configPath = Resolve-ProjectPath -Path ([string]$Selection.config_path)
+    $summary = Get-LocalDeploymentSummary -Config $Config
+    switch ($Name) {
+        'Deploy' {
+            if ($summary.Exists -and $summary.InstanceStatus -notin @('destroyed', 'failed')) {
+                throw "当前配置已有状态为 '$($summary.InstanceStatus)' 的实例。请先使用状态、启动、停止或销毁操作。"
+            }
+            & (Join-Path $scriptsRoot 'Test-Configuration.ps1') -ConfigPath $configPath
+            & (Join-Path $scriptsRoot 'Search-VastOffers.ps1') -ConfigPath $configPath | Out-Host
+            Write-Host ''
+            Write-Host '即将创建会产生费用的 Vast.ai 资源：' -ForegroundColor Yellow
+            Write-Host "  镜像：$($Config.Vast.Instance.Image)"
+            Write-Host ('  GPU 报价上限：${0}/小时' -f $Config.Vast.Search.MaxHourlyUsd)
+            if ($Config.Vast.Volume.Enabled) {
+                Write-Host "  持久卷：$($Config.Vast.Volume.SizeGb) GB（另计存储费用，销毁实例后仍保留）"
+            }
+            if (-not (Read-LauncherYesNo -Prompt '确认按以上上限自动选择首个合格报价并部署吗？')) {
+                Write-Host '部署已取消。'
+                return
+            }
+            & (Join-Path $scriptsRoot 'Deploy-Example.ps1') -ConfigPath $configPath -Force
+        }
+        'Search' {
+            & (Join-Path $scriptsRoot 'Search-VastOffers.ps1') -ConfigPath $configPath | Out-Host
+        }
+        'Status' {
+            if (-not $summary.Exists) { Write-Host '当前配置尚未部署。' -ForegroundColor Yellow; return }
+            & (Join-Path $scriptsRoot 'Get-DeploymentStatus.ps1') -ConfigPath $configPath
+        }
+        'Tunnel' {
+            if (-not $summary.Exists -or $summary.InstanceStatus -ne 'running') { throw '只有运行中的实例才能打开隧道。' }
+            & (Join-Path $scriptsRoot 'Open-ComfyUITunnel.ps1') -ConfigPath $configPath
+        }
+        'Provision' {
+            if (-not $summary.Exists -or $summary.InstanceStatus -ne 'running') { throw '只有运行中的实例才能执行配置部署。' }
+            & (Join-Path $scriptsRoot 'Provision-Instance.ps1') -ConfigPath $configPath
+        }
+        'Start' {
+            if (-not $summary.Exists) { throw '当前配置尚未部署。' }
+            & (Join-Path $scriptsRoot 'Start-VastInstance.ps1') -ConfigPath $configPath
+        }
+        'Stop' {
+            if (-not $summary.Exists) { throw '当前配置尚未部署。' }
+            & (Join-Path $scriptsRoot 'Stop-VastInstance.ps1') -ConfigPath $configPath
+        }
+        'Configure' {
+            & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') -Profile ([string]$Selection.profile) -Force | Out-Host
+        }
+        'SwitchProfile' {
+            Switch-LauncherProfile -CurrentSelection $Selection
+        }
+        'Test' {
+            & (Join-Path $scriptsRoot 'Test-Configuration.ps1') -ConfigPath $configPath
+        }
+        'Destroy' {
+            if (-not $summary.Exists -or $summary.InstanceStatus -eq 'destroyed') { throw '没有可销毁的活动实例。' }
+            $instanceId = $summary.State.instance_id
+            if (-not (Read-LauncherYesNo -Prompt "确认永久销毁实例 $instanceId 吗？")) {
+                Write-Host '销毁已取消。'; return
+            }
+            & (Join-Path $scriptsRoot 'Destroy-VastInstance.ps1') -ConfigPath $configPath -Force
+        }
+        'RemoveVolume' {
+            if (-not $summary.Exists -or -not $summary.State.volume_id -or $summary.VolumeStatus -eq 'deleted') {
+                throw '没有可删除的持久卷。'
+            }
+            $volumeId = $summary.State.volume_id
+            if (-not (Read-LauncherYesNo -Prompt "确认永久删除持久卷 $volumeId 及其中模型和输出吗？")) {
+                Write-Host '删除已取消。'; return
+            }
+            & (Join-Path $scriptsRoot 'Remove-VastVolume.ps1') -ConfigPath $configPath -Force
+        }
+        default { throw "未知操作：$Name" }
+    }
+}
+
+$selection = Get-LauncherSelection
+$firstRun = ($null -eq $selection)
+$environmentConfig = if ($firstRun) { Join-Path $projectRoot 'config.psd1' } else { Resolve-ProjectPath -Path ([string]$selection.config_path) }
+& (Join-Path $scriptsRoot 'Initialize-Environment.ps1') -ConfigPath $environmentConfig
+
+if ($firstRun) {
+    Write-Host ''
+    Write-Host '这是首次运行。接下来通过终端向导初始化搜索和部署参数。' -ForegroundColor Cyan
+    & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') | Out-Host
+    $selection = Get-LauncherSelection
+    if ($Action -in @('Configure', 'SwitchProfile')) { $Action = 'Menu' }
+    if ($Action -eq 'Menu' -and (Read-LauncherYesNo -Prompt '初始化已完成，现在搜索报价并开始部署吗？')) {
+        $Action = 'Deploy'
+    }
+}
+
+if ($Action -ne 'Menu') {
+    $selection = Get-LauncherSelection
+    $config = Get-DeployConfig -ConfigPath ([string]$selection.config_path)
+    Invoke-LauncherOperation -Name $Action -Selection $selection -Config $config
+    exit 0
+}
+
+while ($true) {
+    $selection = Get-LauncherSelection
+    $config = Get-DeployConfig -ConfigPath ([string]$selection.config_path)
+    $summary = Get-LocalDeploymentSummary -Config $config
+    $selectedAction = Show-LauncherMenu -Selection $selection -Config $config -Summary $summary
+    if ($selectedAction -eq 'Exit') { break }
+    try {
+        Invoke-LauncherOperation -Name $selectedAction -Selection $selection -Config $config
+    } catch {
+        Write-Host ''
+        Write-Host ("操作失败：{0}" -f $_.Exception.Message) -ForegroundColor Red
+    }
+}

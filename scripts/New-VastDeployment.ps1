@@ -61,7 +61,7 @@ foreach ($offer in $offers) {
 }
 
 if ($null -eq $selectedOffer) {
-    throw 'No matched GPU offer also satisfied the hourly ceiling and volume requirements. Adjust the stored config scope explicitly.'
+    throw 'No matched GPU offer also satisfied the hourly ceiling and volume requirements. Run Start-VastAnima.ps1 -Action Configure to adjust the stored scope.'
 }
 
 $offerId = [int64](Get-ObjectProperty -Object $selectedOffer -Names @('id'))

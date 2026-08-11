@@ -2,6 +2,11 @@ state/*.json
 state/*.log
 state/*.tmp
 !state/.gitkeep
+profiles/*/state/*.json
+profiles/*/state/*.log
+profiles/*/state/*.tmp
+!profiles/*/state/.gitkeep
+user-config/*.json
 *.key
 *.pem
 .env
