@@ -46,6 +46,27 @@ if (Test-DeploymentStateCanResumeInstance -State $retainedVolume) {
     throw 'A retained volume from a destroyed instance was incorrectly resumable.'
 }
 
+$continueDeployment = [pscustomobject]@{
+    instance_id = 47511276
+    instance_status = 'created'
+    provisioned = $false
+}
+if (-not (Test-DeploymentStateCanContinueDeployment -State $continueDeployment)) {
+    throw 'A created but unprovisioned instance could not continue deployment.'
+}
+$continueDeployment.provisioned = $true
+if (Test-DeploymentStateCanContinueDeployment -State $continueDeployment) {
+    throw 'An already provisioned instance was incorrectly resumable.'
+}
+
+$singleInstanceResponse = [pscustomobject]@{
+    instances = [pscustomobject]@{ id = 47511276; actual_status = 'running' }
+}
+$singleInstanceItems = @(ConvertTo-ObjectArray -Value $singleInstanceResponse -CandidateProperties @('instances'))
+if ($singleInstanceItems.Count -ne 1 -or $singleInstanceItems[0].id -ne 47511276) {
+    throw 'A single Vast instance response was not normalized to a one-item array.'
+}
+
 $cleanedUp = [pscustomobject]@{
     instance_id = 123
     instance_status = 'destroyed'

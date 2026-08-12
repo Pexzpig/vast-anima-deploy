@@ -80,12 +80,13 @@ function Get-LocalDeploymentSummary {
 
     $statePath = Resolve-ProjectPath -Path ([string]$Config.Local.StatePath)
     if (-not (Test-Path -LiteralPath $statePath)) {
-        return [pscustomobject]@{ Exists = $false; HasActiveResources = $false; CanResumeInstance = $false; InstanceStatus = '未部署'; VolumeStatus = '无'; State = $null }
+        return [pscustomobject]@{ Exists = $false; HasActiveResources = $false; CanResumeInstance = $false; CanContinueDeployment = $false; InstanceStatus = '未部署'; VolumeStatus = '无'; State = $null }
     }
     try {
         $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
         $hasActiveResources = Test-DeploymentStateHasActiveResources -State $state
         $canResumeInstance = Test-DeploymentStateCanResumeInstance -State $state
+        $canContinueDeployment = Test-DeploymentStateCanContinueDeployment -State $state
         $instanceStatus = if ($state.instance_id) {
             if ($state.instance_status) { [string]$state.instance_status } else { 'unknown' }
         } elseif ([string]$state.instance_status -in @('pending', 'create_failed', 'failed')) {
@@ -106,6 +107,7 @@ function Get-LocalDeploymentSummary {
             Exists = $true
             HasActiveResources = $hasActiveResources
             CanResumeInstance = $canResumeInstance
+            CanContinueDeployment = $canContinueDeployment
             InstanceStatus = $instanceStatus
             VolumeStatus = $volumeStatus
             State = $state
@@ -160,12 +162,16 @@ function Invoke-LauncherOperation {
     $summary = Get-LocalDeploymentSummary -Config $Config
     switch ($Name) {
         'Deploy' {
-            if ($summary.Exists -and $summary.HasActiveResources -and -not $summary.CanResumeInstance) {
+            if ($summary.Exists -and $summary.HasActiveResources -and
+                -not $summary.CanResumeInstance -and
+                -not $summary.CanContinueDeployment) {
                 throw "当前配置仍跟踪远端实例或持久卷。请先查看状态并处理已有资源，避免重复计费。"
             }
             & (Join-Path $scriptsRoot 'Test-Configuration.ps1') -ConfigPath $configPath
             Write-Host ''
-            if ($summary.CanResumeInstance) {
+            if ($summary.CanContinueDeployment) {
+                Write-Host "将继续实例 $($summary.State.instance_id) 的部署，不会重新创建实例或持久卷。" -ForegroundColor Yellow
+            } elseif ($summary.CanResumeInstance) {
                 Write-Host "将复用已创建的持久卷 $($summary.State.volume_id)，只重试创建实例，不会重复创建卷。" -ForegroundColor Yellow
             } else {
                 Write-Host '正在实时选择同时满足 GPU、预算和持久卷条件的报价；确认前会显示实际价格。' -ForegroundColor Cyan

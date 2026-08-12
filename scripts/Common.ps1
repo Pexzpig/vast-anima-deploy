@@ -354,6 +354,18 @@ function Test-DeploymentStateCanResumeInstance {
         $volumeStatus -eq 'created')
 }
 
+function Test-DeploymentStateCanContinueDeployment {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $instanceId = Get-ObjectProperty -Object $State -Names @('instance_id')
+    $instanceStatus = [string](Get-ObjectProperty -Object $State -Names @('instance_status') -Default '')
+    $provisioned = [bool](Get-ObjectProperty -Object $State -Names @('provisioned') -Default $false)
+
+    return [bool]($null -ne $instanceId -and
+        $instanceStatus -ne 'destroyed' -and
+        -not $provisioned)
+}
+
 function Format-UsdPrice {
     param(
         [Parameter(Mandatory = $true)][double]$Amount,
@@ -467,7 +479,7 @@ function Wait-VastInstanceRunning {
 
     while ((Get-Date) -lt $deadline) {
         $instance = Invoke-VastJson -Config $Config -Arguments @('show', 'instance', [string]$InstanceId, '--raw')
-        $items = ConvertTo-ObjectArray -Value $instance -CandidateProperties @('instances')
+        $items = @(ConvertTo-ObjectArray -Value $instance -CandidateProperties @('instances'))
         if ($items.Count -eq 0) { throw "Instance $InstanceId was not returned by Vast." }
         $item = $items[0]
         $status = [string](Get-ObjectProperty -Object $item -Names @('actual_status', 'status', 'cur_state') -Default 'unknown')
@@ -506,7 +518,8 @@ function Get-VastSshEndpoint {
     )
 
     $instanceResponse = Invoke-VastJson -Config $Config -Arguments @('show', 'instance', [string]$InstanceId, '--raw')
-    $items = ConvertTo-ObjectArray -Value $instanceResponse -CandidateProperties @('instances')
+    $items = @(ConvertTo-ObjectArray -Value $instanceResponse -CandidateProperties @('instances'))
+    if ($items.Count -eq 0) { throw "Instance $InstanceId was not returned by Vast." }
     $instance = $items[0]
     $hostName = Get-ObjectProperty -Object $instance -Names @('ssh_host', 'public_ipaddr', 'public_ip')
     $port = Get-ObjectProperty -Object $instance -Names @('ssh_port')
