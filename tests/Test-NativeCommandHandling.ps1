@@ -46,6 +46,16 @@ if (-not $authenticatedStatus.Authenticated -or $authenticatedStatus.UserId -ne 
 }
 
 $fixturePublicKey = Join-Path $PSScriptRoot 'fixtures\fake-public-key.pub'
+$expectedPublicKeyContent = (Get-Content -LiteralPath $fixturePublicKey -Raw -Encoding ASCII).Trim()
+$createArguments = @(Get-VastSshKeyCreateArguments -PublicKeyPath $fixturePublicKey)
+if ($createArguments.Count -ne 4 -or
+    $createArguments[0] -ne 'create' -or
+    $createArguments[1] -ne 'ssh-key' -or
+    $createArguments[2] -ne $expectedPublicKeyContent -or
+    $createArguments[2] -eq $fixturePublicKey -or
+    $createArguments[3] -ne '-y') {
+    throw "The SSH key create request did not contain the public-key text: $($createArguments -join ' | ')"
+}
 if (-not (Test-SshPublicKeyRegistered -PublicKeyPath $fixturePublicKey -AccountText $authenticatedStatus.RawText)) {
     throw 'The registered SSH public key was not detected in the Vast account response.'
 }

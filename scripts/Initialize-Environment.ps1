@@ -80,19 +80,6 @@ function Ensure-VastCli {
     return $installed.Source
 }
 
-function Resolve-SshIdentityPath {
-    param([string]$Path)
-
-    if (-not $Path) { return $null }
-    $expanded = [Environment]::ExpandEnvironmentVariables($Path)
-    if ($expanded -eq '~') { return [Environment]::GetFolderPath('UserProfile') }
-    if ($expanded.StartsWith('~\') -or $expanded.StartsWith('~/')) {
-        return Join-Path ([Environment]::GetFolderPath('UserProfile')) $expanded.Substring(2)
-    }
-    if ([System.IO.Path]::IsPathRooted($expanded)) { return $expanded }
-    return Resolve-ProjectPath -Path $expanded
-}
-
 function Get-OrCreateSshKeyPair {
     $sshDirectory = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.ssh'
     $candidatePrivateKeys = @()
@@ -175,9 +162,8 @@ function Ensure-VastSshKey {
 
     if (-not $registered) {
         Write-Host "账户尚未注册当前本机公钥，正在自动注册：$($KeyPair.PublicKeyPath)" -ForegroundColor Yellow
-        $createResult = Invoke-NativeCommandCapture -Command $CliPath -Arguments @(
-            'create', 'ssh-key', $KeyPair.PublicKeyPath, '-y'
-        )
+        $createArguments = @(Get-VastSshKeyCreateArguments -PublicKeyPath $KeyPair.PublicKeyPath)
+        $createResult = Invoke-NativeCommandCapture -Command $CliPath -Arguments $createArguments
         if ($createResult.ExitCode -ne 0) {
             $message = $createResult.Text
             if ($message -notmatch '(?i)already|exist|duplicate') {
@@ -185,6 +171,7 @@ function Ensure-VastSshKey {
             }
         }
 
+        $verification = $null
         for ($attempt = 1; $attempt -le 3 -and -not $registered; $attempt++) {
             if ($attempt -gt 1) { Start-Sleep -Seconds 1 }
             $verification = Invoke-NativeCommandCapture -Command $CliPath -Arguments @('show', 'ssh-keys', '--raw')
@@ -195,7 +182,12 @@ function Ensure-VastSshKey {
             }
         }
         if (-not $registered) {
-            throw '[VAST_SSH_VERIFY_FAILED] SSH 公钥提交后仍未在 Vast.ai 账户中查到，请检查 API key 权限。'
+            $verificationDetail = if ($null -eq $verification) {
+                '未取得复查响应。'
+            } else {
+                "复查退出码：$($verification.ExitCode)；响应：$($verification.Text)"
+            }
+            throw "[VAST_SSH_VERIFY_FAILED] Vast CLI 报告公钥提交成功，但账户中仍未查到该公钥。请确认 API key 具有 user_read/user_write 权限，并检查 CLI/API 响应。提交响应：$($createResult.Text)；$verificationDetail"
         }
     }
 

@@ -12,6 +12,19 @@ function Resolve-ProjectPath {
     return [System.IO.Path]::GetFullPath((Join-Path $script:ProjectRoot $Path))
 }
 
+function Resolve-SshIdentityPath {
+    param([string]$Path)
+
+    if (-not $Path) { return $null }
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path)
+    if ($expanded -eq '~') { return [Environment]::GetFolderPath('UserProfile') }
+    if ($expanded.StartsWith('~\') -or $expanded.StartsWith('~/')) {
+        return Join-Path ([Environment]::GetFolderPath('UserProfile')) $expanded.Substring(2)
+    }
+    if ([System.IO.Path]::IsPathRooted($expanded)) { return $expanded }
+    return Resolve-ProjectPath -Path $expanded
+}
+
 function ConvertTo-HashtableDeep {
     param(
         [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
@@ -171,7 +184,7 @@ function Get-VastAuthenticationStatus {
         }
     }
 
-    throw "[VAST_AUTH_CHECK_FAILED] 无法确认 Vast CLI 登录状态（退出码 $($result.ExitCode)）。请检查网络或 CLI 配置。`n$($result.Text)"
+    throw "[VAST_AUTH_CHECK_FAILED] Could not verify Vast CLI authentication (exit code $($result.ExitCode)). Check the network and CLI configuration.`n$($result.Text)"
 }
 
 function Test-VastAuthentication {
@@ -190,6 +203,38 @@ function Test-SshPublicKeyRegistered {
     $parts = (Get-Content -LiteralPath $PublicKeyPath -Raw).Trim() -split '\s+'
     if ($parts.Count -lt 2 -or -not $parts[1]) { return $false }
     return ($AccountText -match [regex]::Escape($parts[1]))
+}
+
+function Get-SshPublicKeyContent {
+    param([Parameter(Mandatory = $true)][string]$PublicKeyPath)
+
+    if (-not (Test-Path -LiteralPath $PublicKeyPath -PathType Leaf)) {
+        throw "SSH public key file was not found: $PublicKeyPath"
+    }
+
+    $content = (Get-Content -LiteralPath $PublicKeyPath -Raw -Encoding ASCII).Trim()
+    $lines = @($content -split "`r?`n" | Where-Object { $_.Trim() })
+    if ($lines.Count -ne 1) {
+        throw "SSH public key must contain exactly one non-empty line: $PublicKeyPath"
+    }
+
+    $parts = $content -split '\s+'
+    $validType = $parts.Count -ge 2 -and $parts[0] -match '^(ssh-|ecdsa-|sk-)'
+    $validBody = $parts.Count -ge 2 -and $parts[1] -match '^[A-Za-z0-9+/]+={0,3}$'
+    if (-not $validType -or -not $validBody) {
+        throw "SSH public key is not in OpenSSH public-key format: $PublicKeyPath"
+    }
+    return $content
+}
+
+function Get-VastSshKeyCreateArguments {
+    param([Parameter(Mandatory = $true)][string]$PublicKeyPath)
+
+    # Current Vast CLI releases pass a supplied argument directly to the API
+    # even though the CLI documentation describes it as a .pub file path.
+    # Supplying the actual OpenSSH key text works with both behaviors.
+    $publicKeyContent = Get-SshPublicKeyContent -PublicKeyPath $PublicKeyPath
+    return @('create', 'ssh-key', $publicKeyContent, '-y')
 }
 
 function Test-SshKeyPairUsable {
@@ -438,8 +483,23 @@ function Get-SshCommonArguments {
         '-o', "StrictHostKeyChecking=$($Config.Vast.Ssh.StrictHostKeyChecking)",
         '-o', "ConnectTimeout=$($Config.Vast.Ssh.ConnectTimeoutSeconds)"
     )
-    $identity = [string]$Config.Vast.Ssh.IdentityFile
+    $identity = Resolve-SshIdentityPath -Path ([string]$Config.Vast.Ssh.IdentityFile)
+    if (-not $identity) {
+        $environmentPath = Resolve-ProjectPath -Path 'user-config/environment.json'
+        if (Test-Path -LiteralPath $environmentPath -PathType Leaf) {
+            try {
+                $environment = Get-Content -LiteralPath $environmentPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                $identity = Resolve-SshIdentityPath -Path ([string]$environment.private_key_path)
+            }
+            catch {
+                throw "Could not read the verified SSH identity from ${environmentPath}: $($_.Exception.Message)"
+            }
+        }
+    }
     if ($identity) {
+        if (-not (Test-Path -LiteralPath $identity -PathType Leaf)) {
+            throw "Configured SSH private key was not found: $identity"
+        }
         $arguments += @('-i', $identity)
     }
     return $arguments

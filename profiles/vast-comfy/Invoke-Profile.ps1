@@ -22,7 +22,10 @@ switch ($Action) {
     }
     'Test' { & (Join-Path $scriptRoot 'Test-Configuration.ps1') -ConfigPath $configPath }
     'Search' { & (Join-Path $scriptRoot 'Search-VastOffers.ps1') -ConfigPath $configPath }
-    'Deploy' { & (Join-Path $scriptRoot 'Deploy-Example.ps1') -ConfigPath $configPath -Force:$Force }
+    'Deploy' {
+        & (Join-Path $scriptRoot 'Initialize-Environment.ps1') -ConfigPath $configPath | Out-Host
+        & (Join-Path $scriptRoot 'Deploy-Example.ps1') -ConfigPath $configPath -Force:$Force
+    }
     'Provision' { & (Join-Path $scriptRoot 'Provision-Instance.ps1') -ConfigPath $configPath }
     'Tunnel' { & (Join-Path $scriptRoot 'Open-ComfyUITunnel.ps1') -ConfigPath $configPath }
     'Status' { & (Join-Path $scriptRoot 'Get-DeploymentStatus.ps1') -ConfigPath $configPath }
