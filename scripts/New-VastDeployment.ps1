@@ -9,14 +9,22 @@ param(
 
 if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'config.psd1' }
 $config = Get-DeployConfig -ConfigPath $ConfigPath
+$volumeConfig = $config.Vast.Volume
+$resumeState = $null
 
 $existingStatePath = Resolve-ProjectPath -Path ([string]$config.Local.StatePath)
 if (Test-Path -LiteralPath $existingStatePath) {
     $existingState = Get-Content -LiteralPath $existingStatePath -Raw | ConvertFrom-Json
     if (Test-DeploymentStateHasActiveResources -State $existingState) {
-        throw "An active instance or retained volume is already tracked in $existingStatePath. Destroy/delete it first so paid resources are not orphaned."
+        if (Test-DeploymentStateCanResumeInstance -State $existingState) {
+            $resumeState = $existingState
+            Write-Warning "Resuming instance creation with existing volume $($existingState.volume_id); no new volume will be created."
+        } else {
+            throw "An active instance or retained volume is already tracked in $existingStatePath. Destroy/delete it first so paid resources are not orphaned."
+        }
+    } else {
+        Write-Warning "Replacing a previous deployment record that has no active remote resources: $existingStatePath"
     }
-    Write-Warning "Replacing a previous deployment record that has no active remote resources: $existingStatePath"
 }
 
 # This is intentionally called on every deployment so the saved scope is
@@ -26,12 +34,20 @@ if ($offers.Count -eq 0) { throw 'Search returned no offers.' }
 
 $selectedOffer = $null
 $selectedVolumeOffer = $null
-$volumeConfig = $config.Vast.Volume
 $eligibleOffers = @($offers | Where-Object {
     [double](Get-ObjectProperty -Object $_ -Names @('dph_total', 'dph') -Default 999999) -le
         [double]$config.Vast.Search.MaxHourlyUsd
 })
+if ($null -ne $resumeState) {
+    $resumeMachineId = [int64](Get-ObjectProperty -Object $resumeState -Names @('machine_id') -Default 0)
+    $eligibleOffers = @($eligibleOffers | Where-Object {
+        [int64](Get-ObjectProperty -Object $_ -Names @('machine_id') -Default 0) -eq $resumeMachineId
+    })
+}
 if ($eligibleOffers.Count -eq 0) {
+    if ($null -ne $resumeState) {
+        throw "No current GPU offer on machine $resumeMachineId can reuse volume $($resumeState.volume_id). Keep the volume and retry later, or delete it before deploying on another machine."
+    }
     throw 'No searched GPU offer is within the configured hourly ceiling.'
 }
 $remainingOffers = @($eligibleOffers)
@@ -66,7 +82,7 @@ while ($null -eq $selectedOffer) {
         }
     }
 
-    if (-not [bool]$volumeConfig.Enabled) {
+    if ($null -ne $resumeState -or -not [bool]$volumeConfig.Enabled) {
         $selectedOffer = $offer
         break
     }
@@ -123,7 +139,14 @@ Write-Host ''
 Write-Host 'Vast.ai deployment price' -ForegroundColor Yellow
 Write-Host "  GPU offer: $offerId | $gpuName | machine $machineId"
 Write-Host "  Instance: $instanceHourlyText USD/hour"
-if ($selectedVolumeOffer) {
+if ($null -ne $resumeState) {
+    $volumeMonthlyUsd = [double](Get-ObjectProperty -Object $resumeState -Names @('volume_monthly_usd') -Default 0)
+    $volumeHourlyUsd = $volumeMonthlyUsd / (30 * 24)
+    $estimatedTotalHourlyUsd += $volumeHourlyUsd
+    Write-Host "  Existing volume: $($resumeState.volume_id) | $($volumeConfig.SizeGb) GB | approximately $(Format-UsdPrice -Amount $volumeMonthlyUsd -Decimals 2) USD/month"
+    Write-Host "  Estimated combined rate: $(Format-UsdPrice -Amount $estimatedTotalHourlyUsd) USD/hour"
+    Write-Host '  This retry reuses the existing volume and will not create another one.' -ForegroundColor Green
+} elseif ($selectedVolumeOffer) {
     $storageUsdPerGbMonth = [double](Get-ObjectProperty -Object $selectedVolumeOffer -Names @('storage_cost') -Default 0)
     $volumeMonthlyUsd = $storageUsdPerGbMonth * [double]$volumeConfig.SizeGb
     $volumeHourlyUsd = $volumeMonthlyUsd / (30 * 24)
@@ -139,33 +162,50 @@ if (-not $Force) {
     if ($confirmation -cne 'RENT') { throw 'Deployment cancelled.' }
 }
 
-$state = [ordered]@{
-    schema_version = 1
-    created_at = (Get-Date).ToUniversalTime().ToString('o')
-    updated_at = (Get-Date).ToUniversalTime().ToString('o')
-    search_query = [string]$config.Vast.Search.Query
-    offer_id = $offerId
-    machine_id = $machineId
-    gpu_name = $gpuName
-    hourly_usd = $hourlyPrice
-    volume_monthly_usd = $volumeMonthlyUsd
-    estimated_total_hourly_usd = $estimatedTotalHourlyUsd
-    volume_id = $null
-    volume_label = $null
-    volume_status = if ([bool]$volumeConfig.Enabled) { 'pending' } else { 'disabled' }
-    instance_id = $null
-    instance_status = 'pending'
-    provisioned = $false
-    provisioned_at = $null
-    ssh_host = $null
-    ssh_port = $null
-    last_error = $null
-    destroyed_at = $null
-    volume_deleted_at = $null
+if ($null -ne $resumeState) {
+    $state = $resumeState
+    $state.search_query = [string]$config.Vast.Search.Query
+    $state.offer_id = $offerId
+    $state.machine_id = $machineId
+    $state.gpu_name = $gpuName
+    $state.hourly_usd = $hourlyPrice
+    $state.volume_monthly_usd = $volumeMonthlyUsd
+    $state.estimated_total_hourly_usd = $estimatedTotalHourlyUsd
+    $state.instance_status = 'pending'
+    $state.provisioned = $false
+    $state.provisioned_at = $null
+    $state.ssh_host = $null
+    $state.ssh_port = $null
+    $state.last_error = $null
+} else {
+    $state = [ordered]@{
+        schema_version = 1
+        created_at = (Get-Date).ToUniversalTime().ToString('o')
+        updated_at = (Get-Date).ToUniversalTime().ToString('o')
+        search_query = [string]$config.Vast.Search.Query
+        offer_id = $offerId
+        machine_id = $machineId
+        gpu_name = $gpuName
+        hourly_usd = $hourlyPrice
+        volume_monthly_usd = $volumeMonthlyUsd
+        estimated_total_hourly_usd = $estimatedTotalHourlyUsd
+        volume_id = $null
+        volume_label = $null
+        volume_status = if ([bool]$volumeConfig.Enabled) { 'pending' } else { 'disabled' }
+        instance_id = $null
+        instance_status = 'pending'
+        provisioned = $false
+        provisioned_at = $null
+        ssh_host = $null
+        ssh_port = $null
+        last_error = $null
+        destroyed_at = $null
+        volume_deleted_at = $null
+    }
 }
 Save-DeploymentState -Config $config -State $state | Out-Null
 
-if ([bool]$volumeConfig.Enabled) {
+if ([bool]$volumeConfig.Enabled -and $null -eq $resumeState) {
     $volumeOfferId = [int64](Get-ObjectProperty -Object $selectedVolumeOffer -Names @('id'))
     $volumeLabel = '{0}_{1}' -f $volumeConfig.LabelPrefix, (Get-Date -Format 'yyyyMMdd_HHmmss')
     $volumeResponse = Invoke-VastJson -Config $config -Arguments @(

@@ -18,6 +18,22 @@ if ($capture.Text -notmatch 'This action requires login') {
     throw "Expected captured stderr, got: $($capture.Text)"
 }
 
+$dockerEnvironment = ConvertTo-DockerEnvironmentString -Environment @{
+    COMFYUI_ARGS = '--disable-auto-launch --enable-cors-header --listen 127.0.0.1 --port 18188'
+    ENABLE_AUTH = 'true'
+    TZ = 'Asia/Shanghai'
+}
+$argumentEcho = Invoke-NativeCommandCapture `
+    -Command (Join-Path $PSScriptRoot 'fixtures\echo-args.cmd') `
+    -Arguments @('--env', $dockerEnvironment, '--raw')
+if ($argumentEcho.ExitCode -ne 0 -or
+    $argumentEcho.Output.Count -ne 3 -or
+    $argumentEcho.Output[0] -ne 'ARG=[--env]' -or
+    $argumentEcho.Output[1] -ne "ARG=[$dockerEnvironment]" -or
+    $argumentEcho.Output[2] -ne 'ARG=[--raw]') {
+    throw "The Vast --env value was split into multiple native arguments:`n$($argumentEcho.Text)"
+}
+
 # Test the exact login probe shape with a deterministic Vast CLI fixture.
 $fakeVastCli = Join-Path $PSScriptRoot 'fixtures\fake-vast-403.cmd'
 $unauthenticatedStatus = Get-VastAuthenticationStatus -CliPath $fakeVastCli

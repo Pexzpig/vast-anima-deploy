@@ -33,6 +33,19 @@ if (-not (Test-DeploymentStateHasActiveResources -State $retainedVolume)) {
     throw 'A retained remote volume was not treated as active.'
 }
 
+$resumable = [pscustomobject]@{
+    instance_id = $null
+    instance_status = 'create_failed'
+    volume_id = 47510939
+    volume_status = 'created'
+}
+if (-not (Test-DeploymentStateCanResumeInstance -State $resumable)) {
+    throw 'A failed instance creation with an existing volume was not resumable.'
+}
+if (Test-DeploymentStateCanResumeInstance -State $retainedVolume) {
+    throw 'A retained volume from a destroyed instance was incorrectly resumable.'
+}
+
 $cleanedUp = [pscustomobject]@{
     instance_id = 123
     instance_status = 'destroyed'

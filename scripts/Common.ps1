@@ -340,6 +340,20 @@ function Test-DeploymentStateHasActiveResources {
     return [bool]($instanceIsActive -or $volumeIsActive)
 }
 
+function Test-DeploymentStateCanResumeInstance {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $instanceId = Get-ObjectProperty -Object $State -Names @('instance_id')
+    $instanceStatus = [string](Get-ObjectProperty -Object $State -Names @('instance_status') -Default '')
+    $volumeId = Get-ObjectProperty -Object $State -Names @('volume_id')
+    $volumeStatus = [string](Get-ObjectProperty -Object $State -Names @('volume_status') -Default '')
+
+    return [bool]($null -eq $instanceId -and
+        $instanceStatus -in @('pending', 'create_failed', 'failed') -and
+        $null -ne $volumeId -and
+        $volumeStatus -eq 'created')
+}
+
 function Format-UsdPrice {
     param(
         [Parameter(Mandatory = $true)][double]$Amount,
@@ -429,8 +443,13 @@ function ConvertTo-DockerEnvironmentString {
         if ($value -match "[\r\n]") {
             throw "Environment variable '$key' contains a newline."
         }
-        $escaped = $value.Replace('"', '\"')
-        $parts.Add("-e $key=`"$escaped`"")
+        if ($value -match "['`"]") {
+            throw "Environment variable '$key' contains a quote that Vast CLI cannot parse safely."
+        }
+        # Keep values with spaces together for Vast CLI's parse_env(), while
+        # avoiding embedded double quotes that break Windows PowerShell 5.1's
+        # native argument serialization.
+        $parts.Add("-e $key='$value'")
     }
     return ($parts -join ' ')
 }
