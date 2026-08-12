@@ -80,14 +80,32 @@ function Get-LocalDeploymentSummary {
 
     $statePath = Resolve-ProjectPath -Path ([string]$Config.Local.StatePath)
     if (-not (Test-Path -LiteralPath $statePath)) {
-        return [pscustomobject]@{ Exists = $false; InstanceStatus = '未部署'; VolumeStatus = '无'; State = $null }
+        return [pscustomobject]@{ Exists = $false; HasActiveResources = $false; InstanceStatus = '未部署'; VolumeStatus = '无'; State = $null }
     }
     try {
         $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $hasActiveResources = Test-DeploymentStateHasActiveResources -State $state
+        $instanceStatus = if ($state.instance_id) {
+            if ($state.instance_status) { [string]$state.instance_status } else { 'unknown' }
+        } elseif ([string]$state.instance_status -in @('pending', 'create_failed', 'failed')) {
+            '未创建（可重试）'
+        } else {
+            '无'
+        }
+        $volumeStatus = if ($state.volume_id) {
+            if ($state.volume_status) { [string]$state.volume_status } else { 'created' }
+        } elseif ([string]$state.volume_status -eq 'disabled') {
+            '未启用'
+        } elseif ([string]$state.volume_status -in @('pending', 'create_failed', 'failed')) {
+            '未创建（可重试）'
+        } else {
+            '无'
+        }
         return [pscustomobject]@{
             Exists = $true
-            InstanceStatus = if ($state.instance_status) { [string]$state.instance_status } else { 'unknown' }
-            VolumeStatus = if ($state.volume_status) { [string]$state.volume_status } elseif ($state.volume_id) { 'created' } else { '无' }
+            HasActiveResources = $hasActiveResources
+            InstanceStatus = $instanceStatus
+            VolumeStatus = $volumeStatus
             State = $state
         }
     } catch {
@@ -140,23 +158,13 @@ function Invoke-LauncherOperation {
     $summary = Get-LocalDeploymentSummary -Config $Config
     switch ($Name) {
         'Deploy' {
-            if ($summary.Exists -and $summary.InstanceStatus -notin @('destroyed', 'failed')) {
-                throw "当前配置已有状态为 '$($summary.InstanceStatus)' 的实例。请先使用状态、启动、停止或销毁操作。"
+            if ($summary.Exists -and $summary.HasActiveResources) {
+                throw "当前配置仍跟踪远端实例或持久卷。请先查看状态并处理已有资源，避免重复计费。"
             }
             & (Join-Path $scriptsRoot 'Test-Configuration.ps1') -ConfigPath $configPath
-            & (Join-Path $scriptsRoot 'Search-VastOffers.ps1') -ConfigPath $configPath | Out-Host
             Write-Host ''
-            Write-Host '即将创建会产生费用的 Vast.ai 资源：' -ForegroundColor Yellow
-            Write-Host "  镜像：$($Config.Vast.Instance.Image)"
-            Write-Host ('  GPU 报价上限：${0}/小时' -f $Config.Vast.Search.MaxHourlyUsd)
-            if ($Config.Vast.Volume.Enabled) {
-                Write-Host "  持久卷：$($Config.Vast.Volume.SizeGb) GB（另计存储费用，销毁实例后仍保留）"
-            }
-            if (-not (Read-LauncherYesNo -Prompt '确认按以上上限自动选择首个合格报价并部署吗？')) {
-                Write-Host '部署已取消。'
-                return
-            }
-            & (Join-Path $scriptsRoot 'Deploy-Example.ps1') -ConfigPath $configPath -Force
+            Write-Host '正在实时选择同时满足 GPU、预算和持久卷条件的报价；确认前会显示实际价格。' -ForegroundColor Cyan
+            & (Join-Path $scriptsRoot 'Deploy-Example.ps1') -ConfigPath $configPath
         }
         'Search' {
             & (Join-Path $scriptsRoot 'Search-VastOffers.ps1') -ConfigPath $configPath | Out-Host
@@ -191,7 +199,7 @@ function Invoke-LauncherOperation {
             & (Join-Path $scriptsRoot 'Test-Configuration.ps1') -ConfigPath $configPath
         }
         'Destroy' {
-            if (-not $summary.Exists -or $summary.InstanceStatus -eq 'destroyed') { throw '没有可销毁的活动实例。' }
+            if (-not $summary.Exists -or -not $summary.State.instance_id -or $summary.State.instance_status -eq 'destroyed') { throw '没有可销毁的活动实例。' }
             $instanceId = $summary.State.instance_id
             if (-not (Read-LauncherYesNo -Prompt "确认永久销毁实例 $instanceId 吗？")) {
                 Write-Host '销毁已取消。'; return

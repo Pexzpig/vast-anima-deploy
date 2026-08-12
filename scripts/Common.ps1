@@ -327,6 +327,29 @@ function Get-ObjectProperty {
     return $Default
 }
 
+function Test-DeploymentStateHasActiveResources {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $instanceId = Get-ObjectProperty -Object $State -Names @('instance_id')
+    $instanceStatus = [string](Get-ObjectProperty -Object $State -Names @('instance_status') -Default '')
+    $volumeId = Get-ObjectProperty -Object $State -Names @('volume_id')
+    $volumeStatus = [string](Get-ObjectProperty -Object $State -Names @('volume_status') -Default '')
+
+    $instanceIsActive = $null -ne $instanceId -and $instanceStatus -ne 'destroyed'
+    $volumeIsActive = $null -ne $volumeId -and $volumeStatus -ne 'deleted'
+    return [bool]($instanceIsActive -or $volumeIsActive)
+}
+
+function Format-UsdPrice {
+    param(
+        [Parameter(Mandatory = $true)][double]$Amount,
+        [int]$Decimals = 4
+    )
+
+    $format = '0.' + ('0' * $Decimals)
+    return '$' + $Amount.ToString($format, [Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Save-JsonFile {
     param(
         [Parameter(Mandatory = $true)]$Value,

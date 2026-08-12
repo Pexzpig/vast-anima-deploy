@@ -12,11 +12,10 @@ $config = Get-DeployConfig -ConfigPath $ConfigPath
 $existingStatePath = Resolve-ProjectPath -Path ([string]$config.Local.StatePath)
 if (Test-Path -LiteralPath $existingStatePath) {
     $existingState = Get-Content -LiteralPath $existingStatePath -Raw | ConvertFrom-Json
-    $instanceStillTracked = $null -ne $existingState.instance_id -and $existingState.instance_status -ne 'destroyed'
-    $volumeStillTracked = $null -ne $existingState.volume_id -and $existingState.volume_status -ne 'deleted'
-    if ($instanceStillTracked -or $volumeStillTracked) {
+    if (Test-DeploymentStateHasActiveResources -State $existingState) {
         throw "An active instance or retained volume is already tracked in $existingStatePath. Destroy/delete it first so paid resources are not orphaned."
     }
+    Write-Warning "Replacing a previous deployment record that has no active remote resources: $existingStatePath"
 }
 
 # This is intentionally called on every deployment so the saved scope is
@@ -69,13 +68,28 @@ $hourlyPrice = [double](Get-ObjectProperty -Object $selectedOffer -Names @('dph_
 $gpuName = [string](Get-ObjectProperty -Object $selectedOffer -Names @('gpu_name') -Default 'unknown')
 $machineId = [int64](Get-ObjectProperty -Object $selectedOffer -Names @('machine_id') -Default 0)
 
-Write-Host "Selected offer ${offerId}: $gpuName, machine $machineId, USD $hourlyPrice/hour" -ForegroundColor Yellow
+$instanceHourlyText = Format-UsdPrice -Amount $hourlyPrice
+$volumeMonthlyUsd = 0.0
+$volumeHourlyUsd = 0.0
+$estimatedTotalHourlyUsd = $hourlyPrice
+
+Write-Host ''
+Write-Host 'Vast.ai deployment price' -ForegroundColor Yellow
+Write-Host "  GPU offer: $offerId | $gpuName | machine $machineId"
+Write-Host "  Instance: $instanceHourlyText USD/hour"
 if ($selectedVolumeOffer) {
-    Write-Host "Selected volume offer $($selectedVolumeOffer.id), size $($volumeConfig.SizeGb) GB, mount $($volumeConfig.MountPath)"
+    $storageUsdPerGbMonth = [double](Get-ObjectProperty -Object $selectedVolumeOffer -Names @('storage_cost') -Default 0)
+    $volumeMonthlyUsd = $storageUsdPerGbMonth * [double]$volumeConfig.SizeGb
+    $volumeHourlyUsd = $volumeMonthlyUsd / (30 * 24)
+    $estimatedTotalHourlyUsd += $volumeHourlyUsd
+    Write-Host "  Volume: $($volumeConfig.SizeGb) GB | $(Format-UsdPrice -Amount $storageUsdPerGbMonth) USD/GB/month | approximately $(Format-UsdPrice -Amount $volumeMonthlyUsd -Decimals 2) USD/month"
+    Write-Host "  Estimated combined rate: $(Format-UsdPrice -Amount $estimatedTotalHourlyUsd) USD/hour"
+    Write-Host '  The persistent volume continues billing after the instance is stopped or destroyed.' -ForegroundColor Yellow
 }
+Write-Host "  Configured instance ceiling: $(Format-UsdPrice -Amount ([double]$config.Vast.Search.MaxHourlyUsd) -Decimals 2) USD/hour"
 
 if (-not $Force) {
-    $confirmation = Read-Host "This rents paid Vast resources. Type RENT to continue"
+    $confirmation = Read-Host 'This creates paid Vast.ai resources at the prices above. Type RENT to continue'
     if ($confirmation -cne 'RENT') { throw 'Deployment cancelled.' }
 }
 
@@ -88,6 +102,8 @@ $state = [ordered]@{
     machine_id = $machineId
     gpu_name = $gpuName
     hourly_usd = $hourlyPrice
+    volume_monthly_usd = $volumeMonthlyUsd
+    estimated_total_hourly_usd = $estimatedTotalHourlyUsd
     volume_id = $null
     volume_label = $null
     volume_status = if ([bool]$volumeConfig.Enabled) { 'pending' } else { 'disabled' }

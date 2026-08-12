@@ -33,5 +33,12 @@ $record = [ordered]@{
 $path = Save-JsonFile -Value $record -Path ([string]$search.LastSearchPath)
 Write-Host "Saved $($offers.Count) matching offers to $path" -ForegroundColor Green
 
-$offers | Select-Object -First 10 id, gpu_name, gpu_ram, dph_total, reliability2, inet_down, machine_id | Format-Table -AutoSize | Out-Host
+$offers | Select-Object -First 10 `
+    id,
+    gpu_name,
+    gpu_ram,
+    @{ Name = 'price_USD_hour'; Expression = { (Format-UsdPrice -Amount ([double]$_.dph_total)) } },
+    reliability2,
+    inet_down,
+    machine_id | Format-Table -AutoSize | Out-Host
 if ($PassThru) { $offers | Write-Output }
