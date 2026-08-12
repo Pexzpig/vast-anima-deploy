@@ -60,7 +60,10 @@ mapfile -t system_packages < <(
   "$base_python" -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["system"]["packages"]))' "$deploy_config"
 )
 apt-get update
-apt-get install -y --no-install-recommends "${system_packages[@]}"
+apt-get install -y --no-install-recommends \
+  -o Dpkg::Options::="--force-confdef" \
+  -o Dpkg::Options::="--force-confold" \
+  "${system_packages[@]}"
 
 for required_command in jq git curl sha256sum supervisorctl supervisord; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
