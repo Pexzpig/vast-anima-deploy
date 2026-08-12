@@ -5,6 +5,7 @@ param([string]$ConfigPath)
 if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'config.psd1' }
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 $state = Get-DeploymentState -Config $config
+$application = Get-DeploymentApplication -Config $config -State $state
 
 $state | Format-List | Out-Host
 if ($null -ne $state.instance_id -and $state.instance_status -ne 'destroyed') {
@@ -26,7 +27,7 @@ if ($null -ne $state.instance_id -and $state.instance_status -ne 'destroyed') {
 
     if ($liveStatus -eq 'running') {
         Write-Host ''
-        Write-Host 'Remote ComfyUI / Codex verification:' -ForegroundColor Cyan
+        Write-Host "Remote $($application.DisplayName) / Codex verification:" -ForegroundColor Cyan
         try {
             $endpoint = Get-VastSshEndpoint -Config $config -InstanceId $state.instance_id
             $verification = Invoke-RemoteDeploymentVerification -Config $config -Endpoint $endpoint

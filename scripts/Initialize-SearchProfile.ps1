@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('vast-comfy', 'base-image')]
-    [string]$Profile,
+    [ValidateSet('ComfyUI', 'WebUI')]
+    [string]$ApplicationType,
     [string[]]$GpuNames,
     [double]$MinGpuRamGb = 16,
     [double]$MaxHourlyUsd = 0.80,
@@ -201,15 +201,15 @@ function Read-GpuSelection {
 }
 
 if (-not $UseDefaults) {
-    Write-WizardPage -Page 1 -Total 4 -Title '选择部署配置'
-    if (-not $Profile) {
-        $profileChoice = Read-WizardChoice -Prompt '请选择配置' -Options @(
-            'vastai/comfy 预装镜像（启动快）',
-            'Vast 基础镜像（完整安装、便于深度定制）'
+    Write-WizardPage -Page 1 -Total 4 -Title '默认远端应用'
+    if (-not $ApplicationType) {
+        $applicationChoice = Read-WizardChoice -Prompt '请选择默认应用' -Options @(
+            'ComfyUI + Anima workflow',
+            'Forge Classic WebUI（neo 分支）'
         ) -DefaultIndex 1
-        $Profile = if ($profileChoice -eq 1) { 'vast-comfy' } else { 'base-image' }
+        $ApplicationType = if ($applicationChoice -eq 1) { 'ComfyUI' } else { 'WebUI' }
     }
-    Write-Host ("已选择：{0}" -f $Profile) -ForegroundColor Green
+    Write-Host ("默认应用：{0}" -f $ApplicationType) -ForegroundColor Green
 
     Write-WizardPage -Page 2 -Total 4 -Title 'GPU 与预算'
     if (-not $GpuNames -or $GpuNames.Count -eq 0) {
@@ -231,14 +231,14 @@ if (-not $UseDefaults) {
         $VolumeSizeGb = [int](Read-WizardNumber -Prompt '持久卷大小（GB）' -Default $VolumeSizeGb -Minimum 50 -Maximum 2048)
     }
 } else {
-    if (-not $Profile) { $Profile = 'vast-comfy' }
+    if (-not $ApplicationType) { $ApplicationType = 'ComfyUI' }
     if (-not $GpuNames -or $GpuNames.Count -eq 0) { $GpuNames = $recommendedGpus }
 }
 
 $unknownGpus = @($GpuNames | Where-Object { $_ -notin $supportedGpus })
 if ($unknownGpus.Count -gt 0) { throw "不支持的 GPU 名称：$($unknownGpus -join ', ')" }
 
-$templatePath = if ($Profile -eq 'vast-comfy') { 'profiles/vast-comfy/config.psd1' } else { 'config.psd1' }
+$templatePath = 'config.psd1'
 $config = Get-DeployConfig -ConfigPath $templatePath
 $queryParts = @(
     ('gpu_name in [{0}]' -f ($GpuNames -join ','))
@@ -258,8 +258,9 @@ $config.Vast.Search.Limit = $SearchLimit
 $config.Vast.Search.MaxHourlyUsd = $MaxHourlyUsd
 $config.Vast.Volume.Enabled = -not [bool]$DisableVolume
 $config.Vast.Volume.SizeGb = $VolumeSizeGb
+$config.Application.DefaultType = $ApplicationType.ToLowerInvariant()
 
-$relativeConfigPath = "user-config/$Profile.json"
+$relativeConfigPath = 'user-config/deployment.json'
 $resolvedConfigPath = Resolve-ProjectPath -Path $relativeConfigPath
 if ((Test-Path -LiteralPath $resolvedConfigPath) -and -not $Force -and $UseDefaults) {
     throw "配置已存在：$resolvedConfigPath。若要覆盖，请使用 -Force。"
@@ -267,7 +268,7 @@ if ((Test-Path -LiteralPath $resolvedConfigPath) -and -not $Force -and $UseDefau
 
 Save-JsonFile -Path $relativeConfigPath -Value $config | Out-Null
 Save-JsonFile -Path 'user-config/launcher.json' -Value ([ordered]@{
-    profile = $Profile
+    deployment = 'pytorch-ui'
     config_path = $relativeConfigPath
     initialized_at = (Get-Date).ToUniversalTime().ToString('o')
 }) | Out-Null
@@ -275,12 +276,14 @@ Save-JsonFile -Path 'user-config/launcher.json' -Value ([ordered]@{
 Write-Host ''
 Write-Host '初始化完成。' -ForegroundColor Green
 Write-Host "配置：$resolvedConfigPath"
+Write-Host "默认应用：$ApplicationType"
 Write-Host "GPU：$($GpuNames -join ', ')"
 Write-Host ('价格上限：${0}/小时' -f $MaxHourlyUsd.ToString('0.####', $script:InvariantCulture))
 Write-Host "持久卷：$(if ($config.Vast.Volume.Enabled) { "$VolumeSizeGb GB" } else { '关闭' })"
 
 [pscustomobject]@{
-    Profile = $Profile
+    Deployment = 'pytorch-ui'
+    ApplicationType = $ApplicationType
     ConfigPath = $relativeConfigPath
     ResolvedConfigPath = $resolvedConfigPath
     Query = $config.Vast.Search.Query

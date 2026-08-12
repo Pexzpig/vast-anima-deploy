@@ -14,6 +14,7 @@ sandbox_mode=$(jq -er '.codex.sandbox_mode' "$deploy_config")
 model=$(jq -r '.codex.model // ""' "$deploy_config")
 auth_mode=$(jq -er '.codex.auth_mode' "$deploy_config")
 api_key_env=$(jq -er '.codex.api_key_environment_variable' "$deploy_config")
+application_type=$(jq -er '.application.type' "$deploy_config")
 
 case "$approval_policy" in
   untrusted|on-request|never) ;;
@@ -59,14 +60,13 @@ fi
 } > "$codex_config"
 
 if [[ ! -e "$project_root/AGENTS.md" ]]; then
-  cat > "$project_root/AGENTS.md" <<'EOF'
-# Anima / ComfyUI workspace rules
-
+  printf '# Anima / %s workspace rules\n\n' "$application_type" > "$project_root/AGENTS.md"
+  cat >> "$project_root/AGENTS.md" <<'EOF'
 - Preserve files under `workflows/original/`; make experimental copies.
 - Do not delete or replace model files unless the user explicitly requests it.
-- Keep ComfyUI bound to localhost and use the SSH tunnel for access.
+- Keep the image application bound to localhost and use the SSH tunnel for access.
 - Record model filename, workflow, seed, size, sampler, scheduler, steps, and CFG.
-- Validate workflow JSON before submitting it to the local ComfyUI API.
+- Validate configuration files before submitting work to the local application API.
 - Do not print, commit, or copy authentication tokens into this workspace.
 EOF
 fi

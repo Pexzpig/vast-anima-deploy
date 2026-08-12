@@ -1,20 +1,12 @@
 @{
-    # Secrets are never stored in this file. Initialize-Vast.ps1 reads this
-    # environment variable and writes the key to Vast CLI's user config.
     Secrets = @{
         VastApiKeyEnvironmentVariable = 'VAST_API_KEY'
-        # Optional: only used if you later choose Codex API-key login manually.
-        # The deployment scripts never upload this secret to Vast.
         OpenAIApiKeyEnvironmentVariable = 'OPENAI_API_KEY'
-        # Current Anima files are public, so this is normally unnecessary.
         HuggingFaceTokenEnvironmentVariable = 'HF_TOKEN'
     }
 
     Vast = @{
         Cli = 'vastai'
-
-        # Every deployment re-runs this stored scope. Vast query syntax uses
-        # underscores in GPU names and '-' after an order field for descending.
         Search = @{
             Query = 'gpu_name in [RTX_3090,RTX_3090_Ti,RTX_4080,RTX_4080S,RTX_4090,RTX_4090D,RTX_5080,RTX_5090,RTX_4000Ada,RTX_4500Ada,RTX_5000Ada,RTX_5880Ada,RTX_6000Ada,RTX_PRO_4000,RTX_PRO_4500,RTX_PRO_5000,RTX_PRO_6000_S,RTX_PRO_6000_WS,RTX_A4000,RTX_A4500,RTX_A5000,RTX_A6000,A10,A10g,A40,L4,L40,L40S,A100_PCIE,A100_SXM4,A100X,A800_PCIE,H100_PCIE,H100_SXM,H100_NVL,H200,H200_NVL,B200] num_gpus=1 gpu_ram>=16 verified=true rentable=true rented=false direct_port_count>=1 reliability>0.98 inet_down>200 cuda_vers>=12.8 dph_total<=0.80'
             Order = 'dph_total'
@@ -22,12 +14,13 @@
             MaxHourlyUsd = 0.80
             LastSearchPath = 'state/last-search.json'
         }
-
         Instance = @{
-            Label = 'anima-comfyui-example'
-            Image = 'vastai/base-image:cuda-12.8.1-cudnn-devel-ubuntu22.04-py310'
+            Label = 'anima-pytorch-ui'
+            # CUDA 12.8 retains compatibility with the configured marketplace
+            # filter while providing a current, GPU-enabled PyTorch runtime.
+            Image = 'vastai/pytorch:cuda-12.8.1-auto'
             OnStartCommand = '/opt/instance-tools/bin/entrypoint.sh'
-            ContainerDiskGb = 30
+            ContainerDiskGb = 60
             DirectSsh = $true
             WaitTimeoutSeconds = 900
             PollIntervalSeconds = 15
@@ -37,41 +30,65 @@
                 ENABLE_HTTPS = 'true'
             }
         }
-
         Volume = @{
             Enabled = $true
             SizeGb = 80
-            LabelPrefix = 'anima_comfyui'
+            LabelPrefix = 'anima_pytorch_ui'
             MountPath = '/workspace'
-
-            # {machine_id} and {size_gb} are replaced after a GPU offer is
-            # selected. This keeps the volume on the same physical machine.
             SearchQueryTemplate = 'machine_id={machine_id} disk_space>={size_gb} verified=true reliability>0.98'
             SearchOrder = 'storage_cost'
             SearchLimit = 10
         }
-
         Ssh = @{
             User = 'root'
             IdentityFile = ''
             StrictHostKeyChecking = 'accept-new'
             ConnectTimeoutSeconds = 15
-            LocalComfyPort = 18188
         }
     }
 
-    ComfyUI = @{
-        InstallationMode = 'managed'
-        Repository = 'https://github.com/comfyanonymous/ComfyUI.git'
-        Ref = 'master'
-        Root = '/workspace/ComfyUI'
+    PyTorch = @{
         Python = '/venv/main/bin/python'
-        Uv = '/venv/main/bin/uv'
+        MinimumCudaVersion = '12.8'
+    }
+
+    Application = @{
+        # Used as the default selection shown before each new deployment.
+        DefaultType = 'comfyui'
+    }
+
+    ComfyUI = @{
+        Repository = 'https://github.com/Comfy-Org/ComfyUI.git'
+        Ref = 'v0.28.0'
+        Root = '/workspace/ComfyUI'
+        Venv = '/workspace/venvs/comfyui'
+        Python = '/workspace/venvs/comfyui/bin/python'
         ListenHost = '127.0.0.1'
         Port = 18188
+        LocalPort = 28188
         ServiceName = 'comfyui'
         LogPath = '/workspace/logs/comfyui.log'
-        ExtraArgs = @()
+        ExtraArgs = @('--disable-auto-launch', '--enable-cors-header')
+    }
+
+    WebUI = @{
+        Repository = 'https://github.com/Haoming02/sd-webui-forge-classic.git'
+        Ref = 'neo'
+        Root = '/workspace/sd-webui-forge-classic'
+        Venv = '/workspace/venvs/webui'
+        Python = '/workspace/venvs/webui/bin/python'
+        PythonVersion = '3.13'
+        ListenHost = '127.0.0.1'
+        Port = 17860
+        LocalPort = 27860
+        ServiceName = 'webui'
+        LogPath = '/workspace/logs/webui.log'
+        ModelRoot = '/workspace/sd-webui-forge-classic/models'
+        ExtraArgs = @('--api', '--uv', '--skip-version-check')
+    }
+
+    System = @{
+        Packages = @('git', 'ffmpeg', 'libgl1', 'libglib2.0-0', 'wget', 'curl', 'aria2', 'tmux', 'jq', 'procps', 'supervisor')
     }
 
     Anima = @{
@@ -81,24 +98,26 @@
         Models = @(
             @{
                 Name = 'anima-base-v1.0.safetensors'
-                Folder = 'diffusion_models'
+                ComfyFolder = 'diffusion_models'
+                WebUiFolder = 'Stable-diffusion'
                 Url = 'https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/diffusion_models/anima-base-v1.0.safetensors'
-                Sha256 = ''
+                Sha256 = 'bd43b7cffe1ed1153d9c41e7beb2f18cb1273eafbaa3af3edd6a173dc90a006e'
             },
             @{
                 Name = 'qwen_3_06b_base.safetensors'
-                Folder = 'text_encoders'
+                ComfyFolder = 'text_encoders'
+                WebUiFolder = 'text_encoder'
                 Url = 'https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/text_encoders/qwen_3_06b_base.safetensors'
-                Sha256 = ''
+                Sha256 = 'cd2a512003e2f9f3cd3c32a9c3573f820bb28c940f73c57b1ddaa983d9223eba'
             },
             @{
                 Name = 'qwen_image_vae.safetensors'
-                Folder = 'vae'
+                ComfyFolder = 'vae'
+                WebUiFolder = 'VAE'
                 Url = 'https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/vae/qwen_image_vae.safetensors'
                 Sha256 = 'a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f'
             }
         )
-
         Baseline = @{
             Width = 1024
             Height = 1024
@@ -120,8 +139,6 @@
         ApiKeyEnvironmentVariable = 'OPENAI_API_KEY'
         ApprovalPolicy = 'on-request'
         SandboxMode = 'workspace-write'
-        # Empty means use the current Codex default/model picker rather than
-        # pinning a model name that can become stale.
         Model = ''
     }
 

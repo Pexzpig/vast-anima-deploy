@@ -22,11 +22,15 @@ if (($volumeArguments -join ' ') -notmatch '--link-volume 456 --mount-path /work
 
 $deploymentScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\New-VastDeployment.ps1') -Raw -Encoding UTF8
 foreach ($expected in @(
+    "[ValidateSet('Prompt', 'ComfyUI', 'WebUI')]",
+    'Select the remote image application',
     "[ValidateSet('Prompt', 'Volume', 'InstanceDisk')]",
     'Select deployment storage',
     'Storage: instance disk only',
     "volume_status = if (`$usePersistentVolume) { 'pending' } else { 'disabled' }",
     "storage_mode = if (`$usePersistentVolume) { 'volume' } else { 'instance_disk' }",
+    'application_type = $selectedApplicationType',
+    'deployment_image = [string]$config.Vast.Instance.Image',
     "@('--onstart-cmd', `$onStartCommand)",
     'Wait-VastSshReady'
 )) {

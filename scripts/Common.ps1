@@ -450,6 +450,50 @@ function Get-ObjectProperty {
     return $Default
 }
 
+function Get-DeploymentApplication {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        $State
+    )
+
+    $configuredDefault = if ($Config.ContainsKey('Application') -and $Config.Application.ContainsKey('DefaultType')) {
+        [string]$Config.Application.DefaultType
+    } else {
+        'comfyui'
+    }
+    $type = [string](Get-ObjectProperty -Object $State -Names @('application_type') -Default $configuredDefault)
+    $type = $type.Trim().ToLowerInvariant()
+
+    switch ($type) {
+        'comfyui' {
+            $settings = $Config.ComfyUI
+            return [pscustomobject]@{
+                Type = 'comfyui'
+                DisplayName = 'ComfyUI'
+                Settings = $settings
+                RemotePort = [int]$settings.Port
+                LocalPort = [int]$settings.LocalPort
+                ServiceName = [string]$settings.ServiceName
+                HealthPath = '/system_stats'
+            }
+        }
+        'webui' {
+            if (-not $Config.ContainsKey('WebUI')) { throw 'WebUI configuration is missing.' }
+            $settings = $Config.WebUI
+            return [pscustomobject]@{
+                Type = 'webui'
+                DisplayName = 'Forge Classic WebUI'
+                Settings = $settings
+                RemotePort = [int]$settings.Port
+                LocalPort = [int]$settings.LocalPort
+                ServiceName = [string]$settings.ServiceName
+                HealthPath = '/'
+            }
+        }
+        default { throw "Unsupported deployment application type: $type" }
+    }
+}
+
 function Find-VastInstanceInResponse {
     param(
         $Response,

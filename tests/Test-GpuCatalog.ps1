@@ -18,7 +18,8 @@ foreach ($model in $requiredModels) {
     }
 }
 
-foreach ($configPath in @('config.psd1', 'profiles/vast-comfy/config.psd1')) {
+$configPath = 'config.psd1'
+foreach ($configPath in @($configPath)) {
     $config = Get-DeployConfig -ConfigPath $configPath
     $query = [string]$config.Vast.Search.Query
     if ($query -notmatch 'gpu_name in \[(?<models>[^\]]+)\]') {

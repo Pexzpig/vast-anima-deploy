@@ -1,20 +1,70 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ $# -ne 1 ]]; then
+if [[ $# -ne 1 || ! -f "$1" ]]; then
   echo "Usage: $0 /path/to/remote-config.json" >&2
   exit 2
 fi
 
 deploy_config=$1
-if [[ ! -f "$deploy_config" ]]; then
-  echo "Remote configuration not found: $deploy_config" >&2
-  exit 2
+stage_number=0
+stage_total=11
+current_stage='startup'
+stage() {
+  stage_number=$((stage_number + 1))
+  current_stage=$1
+  printf '\n[%d/%d] %s\n' "$stage_number" "$stage_total" "$current_stage"
+}
+trap 'code=$?; echo "[FAILED] Stage: $current_stage (line $LINENO, exit $code)" >&2' ERR
+
+stage 'Locating and validating the PyTorch base environment'
+configured_python=$(sed -n 's/.*"python"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$deploy_config" | head -1)
+base_python=${configured_python:-/venv/main/bin/python}
+if [[ ! -x "$base_python" ]]; then
+  base_python=$(command -v python3 || command -v python || true)
+fi
+if [[ -z "$base_python" || ! -x "$base_python" ]]; then
+  echo 'The vastai/pytorch image did not provide an executable Python runtime.' >&2
+  exit 3
 fi
 
-for required_command in jq git curl sha256sum supervisorctl; do
+application_type=$(
+  "$base_python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["application"]["type"])' "$deploy_config"
+)
+if [[ "$application_type" != 'comfyui' && "$application_type" != 'webui' ]]; then
+  echo "Unsupported application type: $application_type" >&2
+  exit 3
+fi
+
+"$base_python" - <<'PY'
+import torch
+assert torch.cuda.is_available(), 'torch.cuda.is_available() is false'
+print(f'Base PyTorch: {torch.__version__}')
+print(f'Base CUDA runtime: {torch.version.cuda}')
+print(f'GPU: {torch.cuda.get_device_name(0)}')
+PY
+minimum_cuda=$("$base_python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["pytorch"]["minimum_cuda_version"])' "$deploy_config")
+"$base_python" - "$minimum_cuda" <<'PY'
+import sys
+import torch
+
+minimum = tuple(int(part) for part in sys.argv[1].split('.')[:2])
+actual_text = torch.version.cuda or '0.0'
+actual = tuple(int(part) for part in actual_text.split('.')[:2])
+assert actual >= minimum, f'CUDA runtime {actual_text} is below required {sys.argv[1]}'
+PY
+
+stage 'Installing required Ubuntu packages'
+export DEBIAN_FRONTEND=noninteractive
+mapfile -t system_packages < <(
+  "$base_python" -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["system"]["packages"]))' "$deploy_config"
+)
+apt-get update
+apt-get install -y --no-install-recommends "${system_packages[@]}"
+
+for required_command in jq git curl sha256sum supervisorctl supervisord; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
-    echo "Required command is missing from the Vast base image: $required_command" >&2
+    echo "Required command is missing after package setup: $required_command" >&2
     exit 3
   fi
 done
@@ -45,105 +95,174 @@ download_file() {
     exit 5
   fi
 
-  echo "Downloading $url"
-  curl --fail --location --retry 6 --retry-delay 5 --continue-at - --output "$partial" "$url"
-  if [[ -n "$expected_sha" ]] && ! echo "$expected_sha  $partial" | sha256sum --check --status; then
-    echo "Checksum verification failed: $partial" >&2
-    exit 5
+  echo "Downloading: $url"
+  echo "Destination: $destination"
+  curl --fail --silent --show-error --location --retry 6 --retry-delay 5 \
+    --continue-at - --output "$partial" "$url" &
+  local curl_pid=$!
+  while kill -0 "$curl_pid" 2>/dev/null; do
+    if [[ -e "$partial" ]]; then
+      printf '[download] %s received for %s\n' "$(du -h "$partial" | awk '{print $1}')" "$(basename "$destination")"
+    else
+      printf '[download] waiting for %s\n' "$(basename "$destination")"
+    fi
+    sleep 10
+  done
+  wait "$curl_pid"
+  if [[ -n "$expected_sha" ]]; then
+    echo "Verifying SHA-256: $(basename "$destination")"
+    echo "$expected_sha  $partial" | sha256sum --check --status || {
+      echo "Checksum verification failed: $partial" >&2
+      exit 5
+    }
   fi
   mv "$partial" "$destination"
+  echo "Download complete: $destination"
 }
 
-comfy_repo=$(json_required '.comfyui.repository')
-comfy_ref=$(json_required '.comfyui.ref')
-comfy_root=$(json_required '.comfyui.root')
-comfy_python=$(json_required '.comfyui.python')
-comfy_uv=$(json_required '.comfyui.uv')
-comfy_host=$(json_required '.comfyui.listen_host')
-comfy_port=$(json_required '.comfyui.port')
-service_name=$(json_required '.comfyui.service_name')
-log_path=$(json_required '.comfyui.log_path')
-project_root=$(json_required '.codex.project_root')
+checkout_repository() {
+  local repository=$1
+  local ref=$2
+  local root=$3
 
-if [[ ! -x "$comfy_python" ]]; then
-  echo "Configured Python does not exist: $comfy_python" >&2
-  exit 6
-fi
-if [[ ! -x "$comfy_uv" ]]; then
-  comfy_uv=$(command -v uv || true)
-fi
-if [[ -z "$comfy_uv" ]]; then
-  echo "uv was not found in the Vast base image." >&2
-  exit 6
-fi
-
-mkdir -p /workspace/logs /workspace/bin "$project_root/workflows/original" "$project_root/records"
-
-if [[ -d "$comfy_root/.git" ]]; then
-  echo "Updating existing ComfyUI checkout without discarding local changes."
-  git -C "$comfy_root" fetch --tags origin
-  git -C "$comfy_root" checkout "$comfy_ref"
-  if git -C "$comfy_root" show-ref --verify --quiet "refs/remotes/origin/$comfy_ref"; then
-    git -C "$comfy_root" pull --ff-only origin "$comfy_ref"
+  if [[ -d "$root/.git" ]]; then
+    echo "Using existing checkout: $root"
+    git -C "$root" fetch --tags origin "$ref"
+    git -C "$root" checkout "$ref"
+    if git -C "$root" show-ref --verify --quiet "refs/remotes/origin/$ref"; then
+      git -C "$root" reset --keep "origin/$ref"
+    fi
+  elif [[ -e "$root" && -n "$(find "$root" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    echo "$root is non-empty and is not a Git checkout; refusing to overwrite it." >&2
+    exit 6
+  else
+    mkdir -p "$(dirname "$root")"
+    git clone --progress --branch "$ref" --single-branch "$repository" "$root"
   fi
-elif [[ -e "$comfy_root" ]]; then
-  echo "$comfy_root exists but is not a Git checkout; refusing to overwrite it." >&2
-  exit 7
+}
+
+stage 'Installing uv and preparing workspace directories'
+"$base_python" -m pip install --upgrade uv
+uv_bin=$(command -v uv || true)
+if [[ -z "$uv_bin" && -x "$(dirname "$base_python")/uv" ]]; then
+  uv_bin="$(dirname "$base_python")/uv"
+fi
+if [[ -z "$uv_bin" ]]; then
+  echo 'uv installation completed but the executable could not be located.' >&2
+  exit 6
+fi
+project_root=$(json_required '.codex.project_root')
+mkdir -p /workspace/logs /workspace/bin /workspace/venvs "$project_root/records"
+
+stage "Preparing the selected application: $application_type"
+if [[ "$application_type" == 'comfyui' ]]; then
+  app_repo=$(json_required '.comfyui.repository')
+  app_ref=$(json_required '.comfyui.ref')
+  app_root=$(json_required '.comfyui.root')
+  app_venv=$(json_required '.comfyui.venv')
+  app_python=$(json_required '.comfyui.python')
+  app_host=$(json_required '.comfyui.listen_host')
+  app_port=$(json_required '.comfyui.port')
+  service_name=$(json_required '.comfyui.service_name')
+  log_path=$(json_required '.comfyui.log_path')
+
+  checkout_repository "$app_repo" "$app_ref" "$app_root"
+  if [[ ! -x "$app_python" ]]; then
+    "$uv_bin" venv "$app_venv" --python "$base_python" --system-site-packages --seed
+  fi
+  "$uv_bin" pip install --python "$app_python" -r "$app_root/requirements.txt"
 else
-  git clone --branch "$comfy_ref" --single-branch "$comfy_repo" "$comfy_root"
+  app_repo=$(json_required '.webui.repository')
+  app_ref=$(json_required '.webui.ref')
+  app_root=$(json_required '.webui.root')
+  app_venv=$(json_required '.webui.venv')
+  app_python=$(json_required '.webui.python')
+  app_python_version=$(json_required '.webui.python_version')
+  app_host=$(json_required '.webui.listen_host')
+  app_port=$(json_required '.webui.port')
+  service_name=$(json_required '.webui.service_name')
+  log_path=$(json_required '.webui.log_path')
+
+  checkout_repository "$app_repo" "$app_ref" "$app_root"
+  export UV_PYTHON_INSTALL_DIR=/workspace/.uv/python
+  if [[ ! -x "$app_python" ]]; then
+    "$uv_bin" python install "$app_python_version"
+    "$uv_bin" venv "$app_venv" --python "$app_python_version" --seed
+  fi
+  mkdir -p "$app_root/models/Stable-diffusion" "$app_root/models/text_encoder" "$app_root/models/VAE"
+  chmod 0755 "$app_root/webui.sh" "$app_root/webui-user.sh" 2>/dev/null || true
 fi
 
-if ! "$comfy_python" -c 'import torch; assert torch.cuda.is_available()' >/dev/null 2>&1; then
-  echo "Installing a CUDA-aware PyTorch build selected by uv."
-  "$comfy_uv" pip install --no-cache --python "$comfy_python" --torch-backend auto torch torchvision torchaudio
+stage 'Verifying the selected application Python environment'
+if [[ "$application_type" == 'comfyui' ]]; then
+  "$app_python" - <<'PY'
+import torch
+assert torch.cuda.is_available(), 'application torch cannot access CUDA'
+print(f'ComfyUI environment: torch={torch.__version__}, cuda={torch.version.cuda}, gpu={torch.cuda.get_device_name(0)}')
+PY
+else
+  echo "Forge Python environment: $($app_python --version)"
+  echo 'Forge installs its pinned GPU packages during its first supervised launch.'
 fi
-"$comfy_uv" pip install --no-cache --python "$comfy_python" -r "$comfy_root/requirements.txt"
 
-while IFS=$'\t' read -r model_name model_folder model_url model_sha; do
-  [[ -n "$model_name" && -n "$model_folder" && -n "$model_url" ]] || {
-    echo "Invalid Anima model entry in configuration." >&2
-    exit 8
-  }
-  download_file "$model_url" "$comfy_root/models/$model_folder/$model_name" "$model_sha"
-done < <(jq -r '.anima.models[] | [.Name, .Folder, .Url, (.Sha256 // "")] | @tsv' "$deploy_config")
+stage 'Downloading and verifying Anima model files'
+while IFS=$'\t' read -r model_name comfy_folder webui_folder model_url model_sha; do
+  if [[ "$application_type" == 'comfyui' ]]; then
+    model_destination="$app_root/models/$comfy_folder/$model_name"
+  else
+    model_destination="$app_root/models/$webui_folder/$model_name"
+  fi
+  download_file "$model_url" "$model_destination" "$model_sha"
+done < <(jq -r '.anima.models[] | [.Name, .ComfyFolder, .WebUiFolder, .Url, (.Sha256 // "")] | @tsv' "$deploy_config")
 
+stage 'Installing application workflow or baseline configuration'
+mkdir -p "$project_root/workflows/original"
 workflow_name=$(json_required '.anima.workflow_file_name')
-workflow_url=$(json_required '.anima.workflow_url')
-workflow_original="$project_root/workflows/original/$workflow_name"
-download_file "$workflow_url" "$workflow_original" ''
-mkdir -p "$comfy_root/user/default/workflows"
-if [[ ! -e "$comfy_root/user/default/workflows/$workflow_name" ]]; then
-  cp "$workflow_original" "$comfy_root/user/default/workflows/$workflow_name"
+if [[ "$application_type" == 'comfyui' ]]; then
+  workflow_url=$(json_required '.anima.workflow_url')
+  workflow_original="$project_root/workflows/original/$workflow_name"
+  download_file "$workflow_url" "$workflow_original" ''
+  mkdir -p "$app_root/user/default/workflows"
+  cp -n "$workflow_original" "$app_root/user/default/workflows/$workflow_name" || true
+else
+  workflow_original='not used by Forge WebUI'
 fi
-
 jq '.anima.baseline' "$deploy_config" > "$project_root/records/anima-baseline.json"
-cat > "$project_root/records/README.md" <<'EOF'
-# Anima baseline record
+jq -n --arg application "$application_type" --arg repository "$app_repo" --arg ref "$app_ref" \
+  '{application:$application, repository:$repository, ref:$ref}' > "$project_root/records/deployment-application.json"
 
-Keep the original workflow unchanged. Copy it before experiments and change one
-prompt group, sampler parameter, or adapter weight at a time. Preserve the
-original ComfyUI PNG metadata or workflow JSON for reproducibility.
-EOF
-
-start_script=/workspace/bin/start-comfyui.sh
-{
-  echo '#!/usr/bin/env bash'
-  echo 'set -Eeuo pipefail'
-  printf 'cd %q\n' "$comfy_root"
-  printf 'exec %q main.py --listen %q --port %q' "$comfy_python" "$comfy_host" "$comfy_port"
-  while IFS= read -r argument; do
-    printf ' %q' "$argument"
-  done < <(jq -r '.comfyui.extra_args[]?' "$deploy_config")
-  printf '\n'
-} > "$start_script"
+stage "Configuring the $service_name Supervisor service"
+start_script="/workspace/bin/start-${service_name}.sh"
+if [[ "$application_type" == 'comfyui' ]]; then
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -Eeuo pipefail'
+    printf 'cd %q\n' "$app_root"
+    printf 'exec %q main.py --listen %q --port %q' "$app_python" "$app_host" "$app_port"
+    while IFS= read -r argument; do printf ' %q' "$argument"; done < <(jq -r '.comfyui.extra_args[]?' "$deploy_config")
+    printf '\n'
+  } > "$start_script"
+else
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -Eeuo pipefail'
+    printf 'cd %q\n' "$app_root"
+    printf 'export VIRTUAL_ENV=%q\n' "$app_venv"
+    printf 'export PATH=%q:"$PATH"\n' "$app_venv/bin"
+    printf 'export python_cmd=%q\n' "$app_python"
+    printf 'export venv_dir=%q\n' "$app_venv"
+    printf 'exec %q launch.py --port %q' "$app_python" "$app_port"
+    while IFS= read -r argument; do printf ' %q' "$argument"; done < <(jq -r '.webui.extra_args[]?' "$deploy_config")
+    printf '\n'
+  } > "$start_script"
+fi
 chmod 0755 "$start_script"
 
-mkdir -p "$(dirname "$log_path")"
-supervisor_config="/etc/supervisor/conf.d/${service_name}.conf"
-cat > "$supervisor_config" <<EOF
+mkdir -p "$(dirname "$log_path")" /var/log/supervisor /var/run
+cat > "/etc/supervisor/conf.d/${service_name}.conf" <<EOF
 [program:$service_name]
 command=$start_script
-directory=$comfy_root
+directory=$app_root
 autostart=true
 autorestart=true
 startsecs=5
@@ -155,33 +274,15 @@ stdout_logfile_backups=2
 redirect_stderr=true
 EOF
 
-# Vast SSH launch mode replaces Docker ENTRYPOINT. Normally OnStartCommand
-# restores the base-image boot chain; this fallback supports older instances.
 if ! supervisorctl pid >/dev/null 2>&1; then
-  echo 'Supervisor is not ready; waiting for the image on-start boot chain...'
-  for _ in $(seq 1 15); do
-    supervisorctl pid >/dev/null 2>&1 && break
-    sleep 2
-  done
+  pgrep -x supervisord >/dev/null 2>&1 || supervisord -c /etc/supervisor/supervisord.conf
+  for _ in $(seq 1 15); do supervisorctl pid >/dev/null 2>&1 && break; sleep 2; done
 fi
-if ! supervisorctl pid >/dev/null 2>&1; then
-  if pgrep -x supervisord >/dev/null 2>&1; then
-    echo 'A supervisord process exists but its control socket is unavailable.' >&2
-    tail -n 100 /var/log/supervisor/supervisord.log 2>/dev/null || true
-    exit 9
-  fi
-  echo 'The image entrypoint was not run by Vast SSH mode; starting Supervisor directly.'
-  mkdir -p /var/log/supervisor /var/run
-  supervisord -c /etc/supervisor/supervisord.conf
-  for _ in $(seq 1 15); do
-    supervisorctl pid >/dev/null 2>&1 && break
-    sleep 2
-  done
-fi
-if ! supervisorctl pid >/dev/null 2>&1; then
-  echo 'Supervisor did not create its control socket.' >&2
-  exit 9
-fi
+supervisorctl pid >/dev/null 2>&1 || { echo 'Supervisor did not become ready.' >&2; exit 7; }
+supervisorctl reread
+supervisorctl update
+supervisorctl restart "$service_name"
+
 onstart_script=/root/onstart.sh
 onstart_marker='# anima-vast-deploy: restore supervisor'
 touch "$onstart_script"
@@ -195,34 +296,40 @@ if command -v supervisorctl >/dev/null 2>&1 && ! supervisorctl pid >/dev/null 2>
 fi
 EOF
   chmod 0755 "$onstart_script"
-  echo 'Installed a restart-safe Supervisor fallback in /root/onstart.sh.'
 fi
 
-supervisorctl reread
-supervisorctl update
-supervisorctl restart "$service_name"
-
-health_url="http://127.0.0.1:${comfy_port}/system_stats"
+stage "Waiting for the $application_type health endpoint"
+health_url="http://${app_host}:${app_port}"
+if [[ "$application_type" == 'comfyui' ]]; then health_url+='/system_stats'; fi
 healthy=false
-for _ in $(seq 1 60); do
-  if curl --silent --fail "$health_url" >/dev/null; then
+for attempt in $(seq 1 450); do
+  if curl --silent --fail --max-time 5 "$health_url" >/dev/null; then
     healthy=true
+    echo "$application_type is healthy: $health_url"
     break
+  fi
+  if (( attempt % 10 == 0 )); then
+    echo "Still waiting for $application_type ($((attempt * 2)) seconds elapsed)..."
+    supervisorctl status "$service_name" || true
+    tail -n 8 "$log_path" 2>/dev/null || true
   fi
   sleep 2
 done
 if [[ "$healthy" != true ]]; then
-  echo "ComfyUI did not become healthy at $health_url" >&2
-  tail -n 100 "$log_path" || true
+  echo "$application_type did not become healthy at $health_url" >&2
+  tail -n 120 "$log_path" 2>/dev/null || true
   exit 9
 fi
 
+stage 'Installing Codex CLI and project configuration'
 if jq -e '.codex.install == true' "$deploy_config" >/dev/null; then
   bash "$(dirname "$0")/configure-codex.sh" "$deploy_config"
 fi
+
+stage 'Running complete deployment verification'
 bash "$(dirname "$0")/verify-deployment.sh" "$deploy_config"
 
-echo "Provisioning complete."
-echo "ComfyUI is bound to $comfy_host:$comfy_port and should be accessed through the SSH tunnel."
-echo "Original workflow: $workflow_original"
-echo "Baseline record: $project_root/records/anima-baseline.json"
+echo "PyTorch-based $application_type provisioning complete."
+echo "Application root: $app_root"
+echo "Application endpoint: $health_url"
+echo "Codex project: $project_root"

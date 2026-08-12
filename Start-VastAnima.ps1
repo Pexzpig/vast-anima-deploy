@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Deploy', 'Search', 'Status', 'Tunnel', 'Provision', 'Start', 'Stop', 'Destroy', 'RemoveVolume', 'Configure', 'SwitchProfile', 'Test')]
+    [ValidateSet('Menu', 'Deploy', 'Search', 'Status', 'Tunnel', 'Provision', 'Start', 'Stop', 'Destroy', 'RemoveVolume', 'Configure', 'Test')]
     [string]$Action = 'Menu'
 )
 
@@ -41,38 +41,68 @@ function Update-LauncherSshIdentity {
     Write-Host "当前部署配置已绑定 SSH 私钥：$PrivateKeyPath" -ForegroundColor Green
 }
 
-function Switch-LauncherProfile {
-    param($CurrentSelection)
+function Initialize-SingleDeploymentConfiguration {
+    $canonicalRelativePath = 'user-config/deployment.json'
+    $canonicalPath = Resolve-ProjectPath -Path $canonicalRelativePath
+    $legacySelection = Get-LauncherSelection
+    $legacyConfig = $null
+    $legacyConfigPath = $null
 
-    Write-Host ''
-    Write-Host '  1. vast-comfy（预装镜像，推荐）'
-    Write-Host '  2. base-image（完整安装，便于定制）'
-    while ($true) {
-        $choice = (Read-Host '请选择要切换到的配置').Trim()
-        if ($choice -in @('1', '2')) { break }
-        Write-Warning '请输入 1 或 2。'
-    }
-    $targetProfile = if ($choice -eq '1') { 'vast-comfy' } else { 'base-image' }
-    if ($CurrentSelection.profile -eq $targetProfile) {
-        Write-Host "当前已经是 $targetProfile。" -ForegroundColor Yellow
-        return
+    if ($null -ne $legacySelection -and $legacySelection.config_path) {
+        $legacyConfigPath = Resolve-ProjectPath -Path ([string]$legacySelection.config_path)
+        if (Test-Path -LiteralPath $legacyConfigPath -PathType Leaf) {
+            $legacyConfig = Get-DeployConfig -ConfigPath $legacyConfigPath
+        }
     }
 
-    $relativeConfigPath = "user-config/$targetProfile.json"
-    if (Test-Path -LiteralPath (Resolve-ProjectPath -Path $relativeConfigPath)) {
+    if (-not (Test-Path -LiteralPath $canonicalPath -PathType Leaf) -and $null -ne $legacyConfig) {
+        Write-Host '检测到旧版多配置结构，正在迁移为单一 PyTorch 部署配置...' -ForegroundColor Cyan
+        $config = Get-DeployConfig -ConfigPath 'config.psd1'
+
+        $config.Vast.Search = $legacyConfig.Vast.Search
+        $config.Vast.Search.LastSearchPath = 'state/last-search.json'
+        $config.Vast.Volume.Enabled = [bool]$legacyConfig.Vast.Volume.Enabled
+        $config.Vast.Volume.SizeGb = [int]$legacyConfig.Vast.Volume.SizeGb
+        $config.Vast.Ssh.IdentityFile = [string]$legacyConfig.Vast.Ssh.IdentityFile
+        $config.Secrets = $legacyConfig.Secrets
+        $config.Codex = $legacyConfig.Codex
+        $config.Application.DefaultType = 'comfyui'
+        Save-JsonFile -Path $canonicalRelativePath -Value $config | Out-Null
+    }
+
+    if ((Test-Path -LiteralPath $canonicalPath -PathType Leaf) -and $null -ne $legacyConfig) {
+        $config = Get-DeployConfig -ConfigPath $canonicalPath
+        $legacyStatePath = Resolve-ProjectPath -Path ([string]$legacyConfig.Local.StatePath)
+        $canonicalStatePath = Resolve-ProjectPath -Path ([string]$config.Local.StatePath)
+        if ($legacyStatePath -ne $canonicalStatePath -and
+            (Test-Path -LiteralPath $legacyStatePath -PathType Leaf) -and
+            -not (Test-Path -LiteralPath $canonicalStatePath -PathType Leaf)) {
+            $legacyState = Get-Content -LiteralPath $legacyStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($legacyState.PSObject.Properties.Name -notcontains 'application_type') {
+                $legacyState | Add-Member -NotePropertyName application_type -NotePropertyValue 'comfyui'
+            }
+            if ($legacyState.PSObject.Properties.Name -notcontains 'deployment_image') {
+                $legacyState | Add-Member -NotePropertyName deployment_image -NotePropertyValue ([string]$legacyConfig.Vast.Instance.Image)
+            }
+            if ($legacyState.PSObject.Properties.Name -contains 'schema_version') {
+                $legacyState.schema_version = 2
+            } else {
+                $legacyState | Add-Member -NotePropertyName schema_version -NotePropertyValue 2
+            }
+            Save-JsonFile -Path ([string]$config.Local.StatePath) -Value $legacyState | Out-Null
+            Write-Host "已保留现有实例/卷状态：$canonicalStatePath" -ForegroundColor Yellow
+        }
+    }
+
+    if (Test-Path -LiteralPath $canonicalPath -PathType Leaf) {
         Save-JsonFile -Path 'user-config/launcher.json' -Value ([ordered]@{
-            profile = $targetProfile
-            config_path = $relativeConfigPath
+            deployment = 'pytorch-ui'
+            config_path = $canonicalRelativePath
             selected_at = (Get-Date).ToUniversalTime().ToString('o')
         }) | Out-Null
-        Update-LauncherSshIdentity -Selection (Get-LauncherSelection) -PrivateKeyPath $environmentStatus.SshPrivateKey
-        Write-Host "已切换到 $targetProfile；已有搜索参数保持不变。" -ForegroundColor Green
-        return
+        return Get-LauncherSelection
     }
-
-    Write-Host "$targetProfile 尚未初始化，接下来只需填写一次该配置的搜索参数。" -ForegroundColor Cyan
-    & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') -Profile $targetProfile -Force | Out-Host
-    Update-LauncherSshIdentity -Selection (Get-LauncherSelection) -PrivateKeyPath $environmentStatus.SshPrivateKey
+    return $null
 }
 
 function Get-LocalDeploymentSummary {
@@ -122,30 +152,31 @@ function Show-LauncherMenu {
 
     Write-Host ''
     Write-Host ('=' * 68) -ForegroundColor DarkCyan
-    Write-Host ' Anima / ComfyUI · Vast.ai 自动部署' -ForegroundColor Cyan
+    $application = Get-DeploymentApplication -Config $Config -State $Summary.State
+    $displayImage = [string](Get-ObjectProperty -Object $Summary.State -Names @('deployment_image') -Default $Config.Vast.Instance.Image)
+    Write-Host ' Anima · Vast.ai PyTorch 自动部署' -ForegroundColor Cyan
     Write-Host ('=' * 68) -ForegroundColor DarkCyan
-    Write-Host "当前配置：$($Selection.profile)"
-    Write-Host "镜像：$($Config.Vast.Instance.Image)"
+    Write-Host "远端应用：$($application.DisplayName)"
+    Write-Host "镜像：$displayImage"
     Write-Host "实例：$($Summary.InstanceStatus)    持久卷：$($Summary.VolumeStatus)"
     Write-Host ''
     Write-Host '  1. 自动搜索并部署'
     Write-Host '  2. 查看符合条件的报价'
     Write-Host '  3. 查看部署状态'
-    Write-Host '  4. 打开 ComfyUI SSH 隧道'
+    Write-Host '  4. 打开应用 SSH 隧道'
     Write-Host '  5. 重新执行配置部署'
     Write-Host '  6. 启动实例'
     Write-Host '  7. 停止实例'
     Write-Host '  8. 修改搜索参数'
-    Write-Host '  9. 切换部署配置'
-    Write-Host ' 10. 检查配置'
-    Write-Host ' 11. 销毁实例'
-    Write-Host ' 12. 永久删除持久卷'
+    Write-Host '  9. 检查配置'
+    Write-Host ' 10. 销毁实例'
+    Write-Host ' 11. 永久删除持久卷'
     Write-Host '  0. 退出'
 
     $mapping = @{
         '1' = 'Deploy'; '2' = 'Search'; '3' = 'Status'; '4' = 'Tunnel'
         '5' = 'Provision'; '6' = 'Start'; '7' = 'Stop'; '8' = 'Configure'
-        '9' = 'SwitchProfile'; '10' = 'Test'; '11' = 'Destroy'; '12' = 'RemoveVolume'
+        '9' = 'Test'; '10' = 'Destroy'; '11' = 'RemoveVolume'
         '0' = 'Exit'
     }
     while ($true) {
@@ -187,7 +218,7 @@ function Invoke-LauncherOperation {
         }
         'Tunnel' {
             if (-not $summary.Exists -or $summary.InstanceStatus -ne 'running') { throw '只有运行中的实例才能打开隧道。' }
-            & (Join-Path $scriptsRoot 'Open-ComfyUITunnel.ps1') -ConfigPath $configPath
+            & (Join-Path $scriptsRoot 'Open-AppTunnel.ps1') -ConfigPath $configPath
         }
         'Provision' {
             if (-not $summary.Exists -or $summary.InstanceStatus -ne 'running') { throw '只有运行中的实例才能执行配置部署。' }
@@ -202,10 +233,7 @@ function Invoke-LauncherOperation {
             & (Join-Path $scriptsRoot 'Stop-VastInstance.ps1') -ConfigPath $configPath
         }
         'Configure' {
-            & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') -Profile ([string]$Selection.profile) -Force | Out-Host
-        }
-        'SwitchProfile' {
-            Switch-LauncherProfile -CurrentSelection $Selection
+            & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') -Force | Out-Host
         }
         'Test' {
             & (Join-Path $scriptsRoot 'Test-Configuration.ps1') -ConfigPath $configPath
@@ -232,7 +260,7 @@ function Invoke-LauncherOperation {
     }
 }
 
-$selection = Get-LauncherSelection
+$selection = Initialize-SingleDeploymentConfiguration
 $firstRun = ($null -eq $selection)
 $environmentConfig = if ($firstRun) { Join-Path $projectRoot 'config.psd1' } else { Resolve-ProjectPath -Path ([string]$selection.config_path) }
 $environmentStatus = & (Join-Path $scriptsRoot 'Initialize-Environment.ps1') -ConfigPath $environmentConfig -PassThru
@@ -246,7 +274,7 @@ if ($firstRun) {
     & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') | Out-Host
     $selection = Get-LauncherSelection
     Update-LauncherSshIdentity -Selection $selection -PrivateKeyPath $environmentStatus.SshPrivateKey
-    if ($Action -in @('Configure', 'SwitchProfile')) { $Action = 'Menu' }
+    if ($Action -eq 'Configure') { $Action = 'Menu' }
     if ($Action -eq 'Menu' -and (Read-LauncherYesNo -Prompt '初始化已完成，现在搜索报价并开始部署吗？')) {
         $Action = 'Deploy'
     }

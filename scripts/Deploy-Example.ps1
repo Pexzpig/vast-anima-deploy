@@ -3,6 +3,8 @@ param(
     [string]$ConfigPath,
     [switch]$Force,
     [int64]$OfferId = 0,
+    [ValidateSet('Prompt', 'ComfyUI', 'WebUI')]
+    [string]$ApplicationType = 'Prompt',
     [ValidateSet('Prompt', 'Volume', 'InstanceDisk')]
     [string]$StorageMode = 'Prompt'
 )
@@ -27,7 +29,7 @@ if (Test-Path -LiteralPath $statePath -PathType Leaf) {
         & (Join-Path $PSScriptRoot 'Provision-Instance.ps1') -ConfigPath $ConfigPath
         Write-Host ''
         Write-Host 'Deployment and provisioning completed.' -ForegroundColor Green
-        Write-Host 'Return to Start-VastAnima.ps1 and choose the ComfyUI tunnel, or run it with -Action Tunnel.'
+        Write-Host 'Return to Start-VastAnima.ps1 and choose the application tunnel, or run it with -Action Tunnel.'
         return
     }
 }
@@ -35,6 +37,7 @@ if (Test-Path -LiteralPath $statePath -PathType Leaf) {
 $deploymentArguments = @{
     ConfigPath = $ConfigPath
     Force = $Force
+    ApplicationType = $ApplicationType
     StorageMode = $StorageMode
 }
 if ($OfferId -gt 0) { $deploymentArguments.OfferId = $OfferId }
@@ -43,4 +46,4 @@ if ($OfferId -gt 0) { $deploymentArguments.OfferId = $OfferId }
 
 Write-Host ''
 Write-Host 'Deployment and provisioning completed.' -ForegroundColor Green
-Write-Host 'Return to Start-VastAnima.ps1 and choose the ComfyUI tunnel, or run it with -Action Tunnel.'
+Write-Host 'Return to Start-VastAnima.ps1 and choose the application tunnel, or run it with -Action Tunnel.'

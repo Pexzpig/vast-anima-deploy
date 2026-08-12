@@ -5,6 +5,11 @@ param([string]$ConfigPath)
 if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'config.psd1' }
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 $state = Get-DeploymentState -Config $config
+$application = Get-DeploymentApplication -Config $config -State $state
+$deploymentImage = [string](Get-ObjectProperty -Object $state -Names @('deployment_image') -Default $config.Vast.Instance.Image)
+if ($deploymentImage -ne [string]$config.Vast.Instance.Image -and $state.instance_id -and [string]$state.instance_status -ne 'destroyed') {
+    throw "Instance $($state.instance_id) was created from '$deploymentImage', but the current template is '$($config.Vast.Instance.Image)'. Keep managing the existing instance or destroy it before creating a PyTorch-based deployment; an instance image cannot be replaced in place."
+}
 
 Assert-CommandExists -Name 'ssh'
 Assert-CommandExists -Name 'scp'
@@ -16,19 +21,42 @@ Wait-VastSshReady -Config $config -Endpoint $endpoint
 
 Write-Host '[local 2/5] Generating the remote deployment configuration...' -ForegroundColor Cyan
 $remoteConfig = [ordered]@{
-    schema_version = 1
+    schema_version = 2
+    application = [ordered]@{
+        type = $application.Type
+    }
+    pytorch = [ordered]@{
+        python = [string]$config.PyTorch.Python
+        minimum_cuda_version = [string]$config.PyTorch.MinimumCudaVersion
+    }
+    system = [ordered]@{
+        packages = @($config.System.Packages)
+    }
     comfyui = [ordered]@{
-        installation_mode = if ($config.ComfyUI.ContainsKey('InstallationMode')) { [string]$config.ComfyUI.InstallationMode } else { 'managed' }
         repository = [string]$config.ComfyUI.Repository
         ref = [string]$config.ComfyUI.Ref
         root = [string]$config.ComfyUI.Root
+        venv = [string]$config.ComfyUI.Venv
         python = [string]$config.ComfyUI.Python
-        uv = [string]$config.ComfyUI.Uv
         listen_host = [string]$config.ComfyUI.ListenHost
         port = [int]$config.ComfyUI.Port
         service_name = [string]$config.ComfyUI.ServiceName
         log_path = [string]$config.ComfyUI.LogPath
         extra_args = @($config.ComfyUI.ExtraArgs)
+    }
+    webui = [ordered]@{
+        repository = [string]$config.WebUI.Repository
+        ref = [string]$config.WebUI.Ref
+        root = [string]$config.WebUI.Root
+        venv = [string]$config.WebUI.Venv
+        python = [string]$config.WebUI.Python
+        python_version = [string]$config.WebUI.PythonVersion
+        listen_host = [string]$config.WebUI.ListenHost
+        port = [int]$config.WebUI.Port
+        service_name = [string]$config.WebUI.ServiceName
+        log_path = [string]$config.WebUI.LogPath
+        model_root = [string]$config.WebUI.ModelRoot
+        extra_args = @($config.WebUI.ExtraArgs)
     }
     anima = [ordered]@{
         variant = [string]$config.Anima.Variant
@@ -114,8 +142,8 @@ $state.ssh_port = $endpoint.Port
 $state.last_error = $null
 Save-DeploymentState -Config $config -State $state | Out-Null
 
-Write-Host "Remote provisioning completed for instance $($state.instance_id)." -ForegroundColor Green
-Write-Host "Open tunnel: .\scripts\Open-ComfyUITunnel.ps1"
+Write-Host "$($application.DisplayName) provisioning completed for instance $($state.instance_id)." -ForegroundColor Green
+Write-Host "Open tunnel: .\scripts\Open-AppTunnel.ps1"
 if ([bool]$config.Codex.Install) {
     Write-Host "Codex login: ssh $($endpoint.User)@$($endpoint.Host) -p $($endpoint.Port), then run codex login --device-auth"
 }

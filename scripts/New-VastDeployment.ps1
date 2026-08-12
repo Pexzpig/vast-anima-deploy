@@ -3,6 +3,8 @@ param(
     [string]$ConfigPath,
     [switch]$Force,
     [int64]$OfferId = 0,
+    [ValidateSet('Prompt', 'ComfyUI', 'WebUI')]
+    [string]$ApplicationType = 'Prompt',
     [ValidateSet('Prompt', 'Volume', 'InstanceDisk')]
     [string]$StorageMode = 'Prompt'
 )
@@ -14,6 +16,7 @@ $config = Get-DeployConfig -ConfigPath $ConfigPath
 $volumeConfig = $config.Vast.Volume
 $resumeState = $null
 $usePersistentVolume = $false
+$selectedApplicationType = $null
 
 $existingStatePath = Resolve-ProjectPath -Path ([string]$config.Local.StatePath)
 if (Test-Path -LiteralPath $existingStatePath) {
@@ -31,16 +34,41 @@ if (Test-Path -LiteralPath $existingStatePath) {
 }
 
 if ($null -ne $resumeState) {
+    $selectedApplicationType = [string](Get-ObjectProperty -Object $resumeState -Names @('application_type') -Default $config.Application.DefaultType)
+    if ($ApplicationType -ne 'Prompt' -and $ApplicationType.ToLowerInvariant() -ne $selectedApplicationType.ToLowerInvariant()) {
+        throw "Deployment is resuming existing resources configured for '$selectedApplicationType'; the application type cannot be changed until those resources are removed."
+    }
+} elseif ($ApplicationType -ne 'Prompt') {
+    $selectedApplicationType = $ApplicationType.ToLowerInvariant()
+} else {
+    $defaultApplication = [string]$config.Application.DefaultType
+    $defaultChoice = if ($defaultApplication -eq 'webui') { '2' } else { '1' }
+    Write-Host ''
+    Write-Host 'Select the remote image application' -ForegroundColor Cyan
+    Write-Host '  1. ComfyUI - node workflow with the Anima workflow template'
+    Write-Host '  2. Forge Classic WebUI - neo branch with Anima model directories'
+    while ($true) {
+        $applicationAnswer = (Read-Host "Select application [$defaultChoice]").Trim()
+        if (-not $applicationAnswer) { $applicationAnswer = $defaultChoice }
+        if ($applicationAnswer -eq '1') { $selectedApplicationType = 'comfyui'; break }
+        if ($applicationAnswer -eq '2') { $selectedApplicationType = 'webui'; break }
+        Write-Warning 'Enter 1 or 2.'
+    }
+}
+$selectedApplication = Get-DeploymentApplication -Config $config -State ([pscustomobject]@{ application_type = $selectedApplicationType })
+Write-Host "Application: $($selectedApplication.DisplayName)" -ForegroundColor Green
+
+if ($null -ne $resumeState) {
     $usePersistentVolume = $true
     if ($StorageMode -eq 'InstanceDisk') {
         throw "Deployment is resuming volume $($resumeState.volume_id); its storage mode cannot be changed without deleting the retained volume and creating a new deployment."
     }
 } elseif (-not [bool]$volumeConfig.Enabled) {
     if ($StorageMode -eq 'Volume') {
-        throw 'StorageMode=Volume was requested, but persistent volumes are disabled in this profile. Re-enable the volume in configuration first.'
+        throw 'StorageMode=Volume was requested, but persistent volumes are disabled in this configuration. Re-enable the volume first.'
     }
     $usePersistentVolume = $false
-    Write-Host "Storage: instance disk only ($($config.Vast.Instance.ContainerDiskGb) GB); persistent volumes are disabled in this profile." -ForegroundColor Yellow
+    Write-Host "Storage: instance disk only ($($config.Vast.Instance.ContainerDiskGb) GB); persistent volumes are disabled in this configuration." -ForegroundColor Yellow
 } elseif ($StorageMode -eq 'Volume') {
     $usePersistentVolume = $true
 } elseif ($StorageMode -eq 'InstanceDisk') {
@@ -65,7 +93,7 @@ if ($null -ne $resumeState) {
 }
 
 if (-not $usePersistentVolume) {
-    Write-Warning "This deployment will use only the $($config.Vast.Instance.ContainerDiskGb) GB instance disk. Destroying the instance permanently deletes ComfyUI, models, workflows, Codex configuration, and outputs."
+    Write-Warning "This deployment will use only the $($config.Vast.Instance.ContainerDiskGb) GB instance disk. Destroying the instance permanently deletes the selected UI, models, workflows/configuration, Codex configuration, and outputs."
 }
 
 # This is intentionally called on every deployment so the saved scope is
@@ -182,6 +210,7 @@ $estimatedTotalHourlyUsd = $hourlyPrice
 
 Write-Host ''
 Write-Host 'Vast.ai deployment price' -ForegroundColor Yellow
+Write-Host "  Application: $($selectedApplication.DisplayName)"
 Write-Host "  GPU offer: $offerId | $gpuName | machine $machineId"
 Write-Host "  Instance: $instanceHourlyText USD/hour"
 if ($null -ne $resumeState) {
@@ -225,6 +254,16 @@ if ($null -ne $resumeState) {
     } else {
         $state | Add-Member -NotePropertyName storage_mode -NotePropertyValue 'volume'
     }
+    if ($state.PSObject.Properties.Name -contains 'application_type') {
+        $state.application_type = $selectedApplicationType
+    } else {
+        $state | Add-Member -NotePropertyName application_type -NotePropertyValue $selectedApplicationType
+    }
+    if ($state.PSObject.Properties.Name -contains 'deployment_image') {
+        $state.deployment_image = [string]$config.Vast.Instance.Image
+    } else {
+        $state | Add-Member -NotePropertyName deployment_image -NotePropertyValue ([string]$config.Vast.Instance.Image)
+    }
     $state.instance_status = 'pending'
     $state.provisioned = $false
     $state.provisioned_at = $null
@@ -233,7 +272,7 @@ if ($null -ne $resumeState) {
     $state.last_error = $null
 } else {
     $state = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         created_at = (Get-Date).ToUniversalTime().ToString('o')
         updated_at = (Get-Date).ToUniversalTime().ToString('o')
         search_query = [string]$config.Vast.Search.Query
@@ -247,6 +286,8 @@ if ($null -ne $resumeState) {
         volume_label = $null
         volume_status = if ($usePersistentVolume) { 'pending' } else { 'disabled' }
         storage_mode = if ($usePersistentVolume) { 'volume' } else { 'instance_disk' }
+        application_type = $selectedApplicationType
+        deployment_image = [string]$config.Vast.Instance.Image
         instance_id = $null
         instance_status = 'pending'
         provisioned = $false
@@ -286,7 +327,7 @@ $createArguments = @(
 )
 $onStartCommand = if ($config.Vast.Instance.ContainsKey('OnStartCommand')) {
     [string]$config.Vast.Instance.OnStartCommand
-} elseif ([string]$config.Vast.Instance.Image -match '^vastai/(?:comfy|base-image):') {
+} elseif ([string]$config.Vast.Instance.Image -match '^vastai/pytorch:') {
     '/opt/instance-tools/bin/entrypoint.sh'
 } else {
     ''
