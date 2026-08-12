@@ -47,4 +47,32 @@ if ((Format-UsdPrice -Amount 0.5907222222) -ne '$0.5907') {
     throw 'USD price formatting is not stable or invariant.'
 }
 
+$choiceRows = @(ConvertTo-VastOfferChoiceRows -Offers @(
+    [pscustomobject]@{
+        id = 25318187
+        gpu_name = 'RTX 6000Ada'
+        gpu_ram = 49140
+        dph_total = 0.5907222222
+        reliability2 = 0.9970279
+        inet_down = 851.4
+        machine_id = 33732
+    },
+    [pscustomobject]@{
+        id = 24964768
+        gpu_name = 'L40S'
+        gpu_ram = 46068
+        dph_total = 0.6009259259
+        reliability2 = 0.9980183
+        inet_down = 587.6
+        machine_id = 41600
+    }
+))
+if ($choiceRows.Count -ne 2 -or
+    $choiceRows[0].choice -ne 1 -or
+    $choiceRows[0].price_USD_hour -ne '$0.5907' -or
+    $choiceRows[1].choice -ne 2 -or
+    $choiceRows[1].offer_id -ne 24964768) {
+    throw 'GPU offer choices were not numbered or priced correctly.'
+}
+
 Write-Host 'Deployment-state recovery and price formatting passed.' -ForegroundColor Green

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$ConfigPath,
-    [switch]$Force
+    [switch]$Force,
+    [int64]$OfferId = 0
 )
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
@@ -20,16 +21,50 @@ if (Test-Path -LiteralPath $existingStatePath) {
 
 # This is intentionally called on every deployment so the saved scope is
 # always re-evaluated against current marketplace offers.
-$offers = @(& (Join-Path $PSScriptRoot 'Search-VastOffers.ps1') -ConfigPath $ConfigPath -PassThru)
+$offers = @(& (Join-Path $PSScriptRoot 'Search-VastOffers.ps1') -ConfigPath $ConfigPath -PassThru -Quiet)
 if ($offers.Count -eq 0) { throw 'Search returned no offers.' }
 
 $selectedOffer = $null
 $selectedVolumeOffer = $null
 $volumeConfig = $config.Vast.Volume
+$eligibleOffers = @($offers | Where-Object {
+    [double](Get-ObjectProperty -Object $_ -Names @('dph_total', 'dph') -Default 999999) -le
+        [double]$config.Vast.Search.MaxHourlyUsd
+})
+if ($eligibleOffers.Count -eq 0) {
+    throw 'No searched GPU offer is within the configured hourly ceiling.'
+}
+$remainingOffers = @($eligibleOffers)
 
-foreach ($offer in $offers) {
-    $hourly = [double](Get-ObjectProperty -Object $offer -Names @('dph_total', 'dph') -Default 999999)
-    if ($hourly -gt [double]$config.Vast.Search.MaxHourlyUsd) { continue }
+while ($null -eq $selectedOffer) {
+    if ($remainingOffers.Count -eq 0) {
+        throw 'None of the selected GPU candidates also satisfied the persistent-volume requirements.'
+    }
+
+    Write-Host ''
+    Write-Host 'Select a GPU offer for deployment' -ForegroundColor Cyan
+    @(ConvertTo-VastOfferChoiceRows -Offers $remainingOffers) | Format-Table -AutoSize | Out-Host
+
+    $offer = $null
+    if ($OfferId -gt 0) {
+        $offer = @($remainingOffers | Where-Object {
+            [int64](Get-ObjectProperty -Object $_ -Names @('id') -Default 0) -eq $OfferId
+        } | Select-Object -First 1)[0]
+        if ($null -eq $offer) {
+            throw "Requested offer ID $OfferId is not in the current eligible search results."
+        }
+    } else {
+        while ($null -eq $offer) {
+            $answer = (Read-Host 'Enter the choice number to deploy, or 0 to cancel').Trim()
+            $choice = 0
+            if (-not [int]::TryParse($answer, [ref]$choice) -or $choice -lt 0 -or $choice -gt $remainingOffers.Count) {
+                Write-Warning "Enter a number from 0 to $($remainingOffers.Count)."
+                continue
+            }
+            if ($choice -eq 0) { throw 'Deployment cancelled.' }
+            $offer = $remainingOffers[$choice - 1]
+        }
+    }
 
     if (-not [bool]$volumeConfig.Enabled) {
         $selectedOffer = $offer
@@ -37,7 +72,9 @@ foreach ($offer in $offers) {
     }
 
     $machineId = [string](Get-ObjectProperty -Object $offer -Names @('machine_id'))
-    if (-not $machineId) { continue }
+    if (-not $machineId) {
+        throw 'The selected GPU offer did not include a machine ID.'
+    }
     $volumeQuery = [string]$volumeConfig.SearchQueryTemplate
     $volumeQuery = $volumeQuery.Replace('{machine_id}', $machineId).Replace('{size_gb}', [string]$volumeConfig.SizeGb)
     try {
@@ -55,8 +92,17 @@ foreach ($offer in $offers) {
         }
     }
     catch {
-        Write-Warning "Volume search failed for machine $machineId; trying the next GPU offer. $($_.Exception.Message)"
+        throw "Volume search failed for selected machine ${machineId}: $($_.Exception.Message)"
     }
+
+    if ($OfferId -gt 0) {
+        throw "Requested offer ID $OfferId has no persistent-volume offer satisfying the configured requirements."
+    }
+    Write-Warning "The selected GPU on machine $machineId has no matching persistent volume. Choose another offer."
+    $selectedId = [int64](Get-ObjectProperty -Object $offer -Names @('id') -Default 0)
+    $remainingOffers = @($remainingOffers | Where-Object {
+        [int64](Get-ObjectProperty -Object $_ -Names @('id') -Default 0) -ne $selectedId
+    })
 }
 
 if ($null -eq $selectedOffer) {

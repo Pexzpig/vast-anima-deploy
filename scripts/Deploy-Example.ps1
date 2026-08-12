@@ -1,13 +1,19 @@
 [CmdletBinding()]
 param(
     [string]$ConfigPath,
-    [switch]$Force
+    [switch]$Force,
+    [int64]$OfferId = 0
 )
 
 $ErrorActionPreference = 'Stop'
 if (-not $ConfigPath) { $ConfigPath = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..')).Path 'config.psd1' }
 
-& (Join-Path $PSScriptRoot 'New-VastDeployment.ps1') -ConfigPath $ConfigPath -Force:$Force
+$deploymentArguments = @{
+    ConfigPath = $ConfigPath
+    Force = $Force
+}
+if ($OfferId -gt 0) { $deploymentArguments.OfferId = $OfferId }
+& (Join-Path $PSScriptRoot 'New-VastDeployment.ps1') @deploymentArguments
 & (Join-Path $PSScriptRoot 'Provision-Instance.ps1') -ConfigPath $ConfigPath
 
 Write-Host ''

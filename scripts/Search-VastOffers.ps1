@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$ConfigPath,
-    [switch]$PassThru
+    [switch]$PassThru,
+    [switch]$Quiet
 )
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
@@ -33,12 +34,9 @@ $record = [ordered]@{
 $path = Save-JsonFile -Value $record -Path ([string]$search.LastSearchPath)
 Write-Host "Saved $($offers.Count) matching offers to $path" -ForegroundColor Green
 
-$offers | Select-Object -First 10 `
-    id,
-    gpu_name,
-    gpu_ram,
-    @{ Name = 'price_USD_hour'; Expression = { (Format-UsdPrice -Amount ([double]$_.dph_total)) } },
-    reliability2,
-    inet_down,
-    machine_id | Format-Table -AutoSize | Out-Host
+if (-not $Quiet) {
+    @(ConvertTo-VastOfferChoiceRows -Offers $offers) |
+        Select-Object -First 10 offer_id, gpu_name, gpu_ram_GB, price_USD_hour, reliability, inet_down_Mbps, machine_id |
+        Format-Table -AutoSize | Out-Host
+}
 if ($PassThru) { $offers | Write-Output }

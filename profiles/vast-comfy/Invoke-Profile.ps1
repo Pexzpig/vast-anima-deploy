@@ -4,7 +4,8 @@ param(
     [ValidateSet('Initialize', 'Test', 'Search', 'Deploy', 'Provision', 'Tunnel', 'Status', 'Start', 'Stop', 'Destroy', 'RemoveVolume')]
     [string]$Action = 'Deploy',
     [switch]$Force,
-    [Security.SecureString]$ApiKey
+    [Security.SecureString]$ApiKey,
+    [int64]$OfferId = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,7 +25,9 @@ switch ($Action) {
     'Search' { & (Join-Path $scriptRoot 'Search-VastOffers.ps1') -ConfigPath $configPath }
     'Deploy' {
         & (Join-Path $scriptRoot 'Initialize-Environment.ps1') -ConfigPath $configPath | Out-Host
-        & (Join-Path $scriptRoot 'Deploy-Example.ps1') -ConfigPath $configPath -Force:$Force
+        $arguments = @{ ConfigPath = $configPath; Force = $Force }
+        if ($OfferId -gt 0) { $arguments.OfferId = $OfferId }
+        & (Join-Path $scriptRoot 'Deploy-Example.ps1') @arguments
     }
     'Provision' { & (Join-Path $scriptRoot 'Provision-Instance.ps1') -ConfigPath $configPath }
     'Tunnel' { & (Join-Path $scriptRoot 'Open-ComfyUITunnel.ps1') -ConfigPath $configPath }

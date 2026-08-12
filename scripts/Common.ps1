@@ -350,6 +350,28 @@ function Format-UsdPrice {
     return '$' + $Amount.ToString($format, [Globalization.CultureInfo]::InvariantCulture)
 }
 
+function ConvertTo-VastOfferChoiceRows {
+    param([Parameter(Mandatory = $true)][object[]]$Offers)
+
+    $rows = @()
+    for ($index = 0; $index -lt $Offers.Count; $index++) {
+        $offer = $Offers[$index]
+        $gpuRamMb = [double](Get-ObjectProperty -Object $offer -Names @('gpu_ram') -Default 0)
+        $reliability = [double](Get-ObjectProperty -Object $offer -Names @('reliability2', 'reliability') -Default 0)
+        $rows += [pscustomobject]@{
+            choice = $index + 1
+            offer_id = Get-ObjectProperty -Object $offer -Names @('id')
+            gpu_name = [string](Get-ObjectProperty -Object $offer -Names @('gpu_name') -Default 'unknown')
+            gpu_ram_GB = [math]::Round($gpuRamMb / 1024, 1)
+            price_USD_hour = Format-UsdPrice -Amount ([double](Get-ObjectProperty -Object $offer -Names @('dph_total', 'dph') -Default 0))
+            reliability = $reliability.ToString('0.0000', [Globalization.CultureInfo]::InvariantCulture)
+            inet_down_Mbps = [math]::Round([double](Get-ObjectProperty -Object $offer -Names @('inet_down') -Default 0), 1)
+            machine_id = Get-ObjectProperty -Object $offer -Names @('machine_id')
+        }
+    }
+    return $rows
+}
+
 function Save-JsonFile {
     param(
         [Parameter(Mandatory = $true)]$Value,
