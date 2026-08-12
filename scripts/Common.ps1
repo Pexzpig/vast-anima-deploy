@@ -469,13 +469,16 @@ function ConvertTo-DockerEnvironmentString {
 function Wait-VastInstanceRunning {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Config,
-        [Parameter(Mandatory = $true)][int64]$InstanceId
+        [Parameter(Mandatory = $true)][int64]$InstanceId,
+        [int]$TerminalStateGraceSeconds = 45
     )
 
     $timeout = [int]$Config.Vast.Instance.WaitTimeoutSeconds
     $poll = [int]$Config.Vast.Instance.PollIntervalSeconds
     $deadline = (Get-Date).AddSeconds($timeout)
-    $fatalStates = @('exited', 'unknown', 'offline', 'error', 'failed')
+    $retryableTerminalStates = @('stopped', 'exited', 'unknown', 'offline')
+    $immediateFatalStates = @('error', 'failed')
+    $terminalStateSince = $null
 
     while ((Get-Date) -lt $deadline) {
         $instance = Invoke-VastJson -Config $Config -Arguments @('show', 'instance', [string]$InstanceId, '--raw')
@@ -483,14 +486,31 @@ function Wait-VastInstanceRunning {
         if ($items.Count -eq 0) { throw "Instance $InstanceId was not returned by Vast." }
         $item = $items[0]
         $status = [string](Get-ObjectProperty -Object $item -Names @('actual_status', 'status', 'cur_state') -Default 'unknown')
-        Write-Host "Instance $InstanceId status: $status"
+        $intendedStatus = [string](Get-ObjectProperty -Object $item -Names @('intended_status') -Default 'unknown')
+        $currentState = [string](Get-ObjectProperty -Object $item -Names @('cur_state') -Default 'unknown')
+        $nextState = [string](Get-ObjectProperty -Object $item -Names @('next_state') -Default 'unknown')
+        $statusMessage = [string](Get-ObjectProperty -Object $item -Names @('status_msg') -Default '')
+        $statusDetails = "actual=$status, intended=$intendedStatus, current=$currentState, next=$nextState"
+        if ($statusMessage) { $statusDetails += ", message=$statusMessage" }
+
+        Write-Host "Instance $InstanceId status: $statusDetails"
         if ($status -eq 'running') { return $item }
-        if ($fatalStates -contains $status) {
-            throw "Instance $InstanceId entered terminal state '$status'. Inspect Vast logs and destroy/retry with another offer."
+
+        if ($immediateFatalStates -contains $status) {
+            throw "Instance $InstanceId failed to start ($statusDetails). Run 'vastai logs $InstanceId --tail 200' for container logs."
+        }
+        if ($retryableTerminalStates -contains $status) {
+            if ($null -eq $terminalStateSince) { $terminalStateSince = Get-Date }
+            $terminalSeconds = ((Get-Date) - $terminalStateSince).TotalSeconds
+            if ($terminalSeconds -ge $TerminalStateGraceSeconds) {
+                throw "Instance $InstanceId did not leave '$status' within $TerminalStateGraceSeconds seconds ($statusDetails). Run 'vastai logs $InstanceId --tail 200' for container logs."
+            }
+        } else {
+            $terminalStateSince = $null
         }
         Start-Sleep -Seconds $poll
     }
-    throw "Timed out after $timeout seconds waiting for instance $InstanceId."
+    throw "Timed out after $timeout seconds waiting for instance $InstanceId to run. Use 'vastai show instance $InstanceId --raw' and 'vastai logs $InstanceId --tail 200' for details."
 }
 
 function Wait-VastVolumeVisible {

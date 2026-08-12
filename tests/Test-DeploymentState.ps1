@@ -109,4 +109,85 @@ if ($choiceRows.Count -ne 2 -or
     throw 'GPU offer choices were not numbered or priced correctly.'
 }
 
+# A start request is asynchronous. The first show-instance response can still
+# contain the previous exited state, so one stale sample must not abort startup.
+$script:instanceStatusResponses = [System.Collections.Queue]::new()
+$script:instanceStatusResponses.Enqueue([pscustomobject]@{
+    instances = [pscustomobject]@{
+        id = 47511276
+        actual_status = 'exited'
+        intended_status = 'running'
+        cur_state = 'stopped'
+        next_state = 'running'
+        status_msg = $null
+    }
+})
+$script:instanceStatusResponses.Enqueue([pscustomobject]@{
+    instances = [pscustomobject]@{
+        id = 47511276
+        actual_status = 'loading'
+        intended_status = 'running'
+        cur_state = 'running'
+        next_state = 'running'
+        status_msg = $null
+    }
+})
+$script:instanceStatusResponses.Enqueue([pscustomobject]@{
+    instances = [pscustomobject]@{
+        id = 47511276
+        actual_status = 'running'
+        intended_status = 'running'
+        cur_state = 'running'
+        next_state = 'running'
+        status_msg = $null
+    }
+})
+
+function Invoke-VastJson {
+    param([hashtable]$Config, [string[]]$Arguments)
+
+    if ($script:instanceStatusResponses.Count -eq 0) {
+        throw 'The startup wait requested more mocked responses than expected.'
+    }
+    return $script:instanceStatusResponses.Dequeue()
+}
+
+$waitConfig = @{
+    Vast = @{
+        Instance = @{
+            WaitTimeoutSeconds = 5
+            PollIntervalSeconds = 0
+        }
+    }
+}
+$runningInstance = Wait-VastInstanceRunning -Config $waitConfig -InstanceId 47511276
+if ($runningInstance.actual_status -ne 'running' -or $script:instanceStatusResponses.Count -ne 0) {
+    throw 'An exited/loading/running startup sequence was not allowed to complete.'
+}
+
+$script:instanceStatusResponses.Enqueue([pscustomobject]@{
+    instances = [pscustomobject]@{
+        id = 47511276
+        actual_status = 'exited'
+        intended_status = 'running'
+        cur_state = 'running'
+        next_state = 'running'
+        status_msg = 'container entrypoint failed'
+    }
+})
+$persistentExitCaught = $false
+try {
+    Wait-VastInstanceRunning -Config $waitConfig -InstanceId 47511276 -TerminalStateGraceSeconds 0 | Out-Null
+}
+catch {
+    $persistentExitCaught = $true
+    if ($_.Exception.Message -notmatch 'container entrypoint failed' -or
+        $_.Exception.Message -notmatch 'vastai logs 47511276') {
+        throw "A persistent exit did not include actionable diagnostics: $($_.Exception.Message)"
+    }
+}
+if (-not $persistentExitCaught) {
+    throw 'A persistent exited state was incorrectly accepted as running.'
+}
+
 Write-Host 'Deployment-state recovery and price formatting passed.' -ForegroundColor Green
