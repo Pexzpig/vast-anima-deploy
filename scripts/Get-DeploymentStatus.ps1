@@ -8,14 +8,20 @@ $state = Get-DeploymentState -Config $config
 
 $state | Format-List | Out-Host
 if ($null -ne $state.instance_id -and $state.instance_status -ne 'destroyed') {
-    $instanceText = Invoke-VastText -Config $config -Arguments @('show', 'instance', [string]$state.instance_id, '--raw')
-    $instanceText | Out-Host
-    $instanceResponse = ConvertFrom-LooseJson -Text $instanceText
-    $instances = @(ConvertTo-ObjectArray -Value $instanceResponse -CandidateProperties @('instances'))
-    $liveStatus = if ($instances.Count -gt 0) {
-        [string](Get-ObjectProperty -Object $instances[0] -Names @('actual_status', 'status', 'cur_state') -Default 'unknown')
+    Write-Host "Reconciling tracked instance $($state.instance_id) with Vast.ai..." -ForegroundColor Cyan
+    $liveInstance = Get-VastAccountInstance -Config $config -InstanceId $state.instance_id -TimeoutSeconds 30
+    if ($null -eq $liveInstance) {
+        Set-DeploymentInstanceDestroyed -Config $config -State $state | Out-Null
+        Write-Warning "Instance $($state.instance_id) is no longer present in Vast.ai. Local state was updated to 'destroyed'."
+        $liveStatus = 'destroyed'
     } else {
-        'unknown'
+        $liveInstance | Format-List | Out-Host
+        $liveStatus = [string](Get-ObjectProperty -Object $liveInstance -Names @('actual_status', 'status', 'cur_state') -Default 'unknown')
+        if ($liveStatus -and $liveStatus -ne 'unknown' -and [string]$state.instance_status -ne $liveStatus) {
+            $state.instance_status = $liveStatus
+            Save-DeploymentState -Config $config -State $state | Out-Null
+            Write-Host "Local instance status was refreshed to '$liveStatus'." -ForegroundColor DarkCyan
+        }
     }
 
     if ($liveStatus -eq 'running') {
@@ -34,5 +40,5 @@ if ($null -ne $state.instance_id -and $state.instance_status -ne 'destroyed') {
     }
 }
 if ($null -ne $state.volume_id -and $state.volume_status -ne 'deleted') {
-    Invoke-VastText -Config $config -Arguments @('show', 'volumes') | Out-Host
+    Invoke-VastText -Config $config -Arguments @('show', 'volumes') -TimeoutSeconds 30 | Out-Host
 }

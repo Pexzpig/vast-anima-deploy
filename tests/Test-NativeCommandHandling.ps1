@@ -14,6 +14,23 @@ $capture = Invoke-NativeCommandCapture -Command $nativePowerShell -Arguments $fa
 if ($capture.ExitCode -ne 23) {
     throw "Expected exit code 23, got $($capture.ExitCode)."
 }
+
+$timeoutCaught = $false
+try {
+    Invoke-NativeCommandCapture `
+        -Command $nativePowerShell `
+        -Arguments @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 5') `
+        -TimeoutSeconds 1 | Out-Null
+}
+catch {
+    $timeoutCaught = $true
+    if ($_.Exception.Message -notmatch '\[NATIVE_COMMAND_TIMEOUT\]') {
+        throw "A timed native command failed for the wrong reason: $($_.Exception.Message)"
+    }
+}
+if (-not $timeoutCaught) {
+    throw 'A timed native command was allowed to run past its deadline.'
+}
 if ($capture.Text -notmatch 'This action requires login') {
     throw "Expected captured stderr, got: $($capture.Text)"
 }

@@ -66,6 +66,34 @@ $singleInstanceItems = @(ConvertTo-ObjectArray -Value $singleInstanceResponse -C
 if ($singleInstanceItems.Count -ne 1 -or $singleInstanceItems[0].id -ne 47511276) {
     throw 'A single Vast instance response was not normalized to a one-item array.'
 }
+$foundInstance = Find-VastInstanceInResponse -Response $singleInstanceResponse -InstanceId 47511276
+if ($null -eq $foundInstance -or $foundInstance.id -ne 47511276) {
+    throw 'The tracked Vast instance was not found in an account response.'
+}
+if ($null -ne (Find-VastInstanceInResponse -Response $singleInstanceResponse -InstanceId 99999999)) {
+    throw 'A missing Vast instance was incorrectly found in an account response.'
+}
+if ($null -ne (Find-VastInstanceInResponse -Response $null -InstanceId 47511276)) {
+    throw 'An empty Vast instance list was not treated as empty.'
+}
+
+function Invoke-VastJson {
+    param([hashtable]$Config, [string[]]$Arguments, [int]$TimeoutSeconds)
+    return [pscustomobject]@{ success = $false; msg = 'permission denied' }
+}
+$listErrorCaught = $false
+try {
+    Get-VastAccountInstance -Config @{} -InstanceId 47511276 | Out-Null
+}
+catch {
+    $listErrorCaught = $true
+    if ($_.Exception.Message -notmatch 'reported an error') {
+        throw "A Vast list error was misclassified: $($_.Exception.Message)"
+    }
+}
+if (-not $listErrorCaught) {
+    throw 'A Vast list error was incorrectly treated as an empty account.'
+}
 
 $cleanedUp = [pscustomobject]@{
     instance_id = 123

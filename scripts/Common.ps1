@@ -86,13 +86,106 @@ function Assert-CommandExists {
     }
 }
 
+function ConvertTo-NativeArgumentString {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Argument)
+
+    if ($Argument -ne '' -and $Argument -notmatch '[\s"]') { return $Argument }
+
+    # Quote according to the Windows CommandLineToArgvW rules. This preserves
+    # embedded spaces and quotes when ProcessStartInfo is used for timeouts.
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$builder.Append(('\' * (($backslashes * 2) + 1)))
+            [void]$builder.Append('"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append(('\' * $backslashes))
+            $backslashes = 0
+        }
+        [void]$builder.Append($character)
+    }
+    if ($backslashes -gt 0) {
+        [void]$builder.Append(('\' * ($backslashes * 2)))
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Invoke-NativeExecutableCaptureWithTimeout {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [string[]]$Arguments = @(),
+        [Parameter(Mandatory = $true)][ValidateRange(1, 3600)][int]$TimeoutSeconds
+    )
+
+    $commandInfo = Get-Command $Command -ErrorAction Stop
+    if ($commandInfo.CommandType -ne 'Application') {
+        throw "[NATIVE_TIMEOUT_UNSUPPORTED] Timed execution requires an executable command, but '$Command' resolved to $($commandInfo.CommandType)."
+    }
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $commandInfo.Source
+    $startInfo.Arguments = (@($Arguments | ForEach-Object {
+        ConvertTo-NativeArgumentString -Argument ([string]$_)
+    }) -join ' ')
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw "Could not start native command '$Command'."
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch {}
+            $process.WaitForExit()
+            throw "[NATIVE_COMMAND_TIMEOUT] Command '$Command' exceeded $TimeoutSeconds seconds and was terminated."
+        }
+        $process.WaitForExit()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        $text = (@($stdout.Trim(), $stderr.Trim()) | Where-Object { $_ }) -join "`n"
+        return [pscustomobject]@{
+            ExitCode = [int]$process.ExitCode
+            Output = @($text -split "`r?`n" | Where-Object { $_ -ne '' })
+            Text = $text.Trim()
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
 function Invoke-NativeCommandCapture {
     param(
         [Parameter(Mandatory = $true)][string]$Command,
-        [string[]]$Arguments = @()
+        [string[]]$Arguments = @(),
+        [ValidateRange(0, 3600)][int]$TimeoutSeconds = 0
     )
 
     Assert-CommandExists -Name $Command
+
+    if ($TimeoutSeconds -gt 0) {
+        return Invoke-NativeExecutableCaptureWithTimeout `
+            -Command $Command `
+            -Arguments $Arguments `
+            -TimeoutSeconds $TimeoutSeconds
+    }
 
     # Windows PowerShell 5.1 turns native stderr into non-terminating
     # NativeCommandError records. With the project-wide Stop preference those
@@ -281,12 +374,13 @@ function ConvertFrom-LooseJson {
 function Invoke-VastText {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Config,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [ValidateRange(0, 3600)][int]$TimeoutSeconds = 0
     )
 
     $cli = [string]$Config.Vast.Cli
     Assert-CommandExists -Name $cli
-    $result = Invoke-NativeCommandCapture -Command $cli -Arguments $Arguments
+    $result = Invoke-NativeCommandCapture -Command $cli -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
     if ($result.ExitCode -ne 0) {
         throw "Vast CLI failed ($($result.ExitCode)): $cli $($Arguments -join ' ')`n$($result.Text)"
     }
@@ -296,10 +390,11 @@ function Invoke-VastText {
 function Invoke-VastJson {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Config,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [ValidateRange(0, 3600)][int]$TimeoutSeconds = 0
     )
 
-    $text = Invoke-VastText -Config $Config -Arguments $Arguments
+    $text = Invoke-VastText -Config $Config -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds
     return ConvertFrom-LooseJson -Text $text
 }
 
@@ -325,6 +420,61 @@ function Get-ObjectProperty {
         }
     }
     return $Default
+}
+
+function Find-VastInstanceInResponse {
+    param(
+        $Response,
+        [Parameter(Mandatory = $true)][int64]$InstanceId
+    )
+
+    $instances = @(ConvertTo-ObjectArray -Value $Response -CandidateProperties @('instances'))
+    $matches = @($instances | Where-Object {
+        [int64](Get-ObjectProperty -Object $_ -Names @('id', 'instance_id', 'contract_id') -Default 0) -eq $InstanceId
+    })
+    if ($matches.Count -eq 0) { return $null }
+    return $matches[0]
+}
+
+function Get-VastAccountInstance {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [Parameter(Mandatory = $true)][int64]$InstanceId,
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 30
+    )
+
+    # Listing the account's active instances is intentionally used instead of
+    # `show instance ID`: a deleted ID can return a CLI/API error, while an
+    # absent list entry cleanly represents a resource deleted in the web UI.
+    $response = Invoke-VastJson `
+        -Config $Config `
+        -Arguments @('show', 'instances', '--raw') `
+        -TimeoutSeconds $TimeoutSeconds
+
+    if ($null -ne $response) {
+        $hasErrorProperty = $response.PSObject.Properties.Name -contains 'error'
+        $hasSuccessProperty = $response.PSObject.Properties.Name -contains 'success'
+        $reportedError = ($hasErrorProperty -and [bool]$response.error) -or
+            ($hasSuccessProperty -and -not [bool]$response.success)
+        if ($reportedError) {
+            throw "Vast API reported an error while listing instances: $($response | ConvertTo-Json -Depth 10 -Compress)"
+        }
+    }
+    return Find-VastInstanceInResponse -Response $response -InstanceId $InstanceId
+}
+
+function Set-DeploymentInstanceDestroyed {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [Parameter(Mandatory = $true)]$State
+    )
+
+    $State.instance_status = 'destroyed'
+    if (-not (Get-ObjectProperty -Object $State -Names @('destroyed_at'))) {
+        $State.destroyed_at = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    Save-DeploymentState -Config $Config -State $State | Out-Null
+    return $State
 }
 
 function Test-DeploymentStateHasActiveResources {
