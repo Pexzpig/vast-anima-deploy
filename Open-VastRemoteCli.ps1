@@ -103,8 +103,12 @@ function Show-DeploymentConnectionSummary {
     Write-Host ("GPU offer / machine     : {0} / {1}" -f $State.offer_id, $State.machine_id)
     Write-Host ("GPU                     : {0}" -f $State.gpu_name)
     Write-Host ("Instance price          : {0} USD/hour" -f (Format-OptionalUsd -Amount $hourlyUsd))
-    Write-Host ("Volume                  : {0} ({1} GB, {2})" -f $State.volume_id, $Config.Vast.Volume.SizeGb, $State.volume_status)
-    Write-Host ("Volume price estimate   : {0} USD/month" -f (Format-OptionalUsd -Amount $volumeMonthlyUsd -Decimals 2))
+    if ($null -ne $State.volume_id) {
+        Write-Host ("Volume                  : {0} ({1} GB, {2})" -f $State.volume_id, $Config.Vast.Volume.SizeGb, $State.volume_status)
+        Write-Host ("Volume price estimate   : {0} USD/month" -f (Format-OptionalUsd -Amount $volumeMonthlyUsd -Decimals 2))
+    } else {
+        Write-Host ("Storage                 : instance disk only ({0} GB); no persistent volume" -f $Config.Vast.Instance.ContainerDiskGb)
+    }
     Write-Host ("Combined rate estimate  : {0} USD/hour" -f (Format-OptionalUsd -Amount $combinedHourlyUsd))
     Write-Host ("Volume mount            : {0}" -f $Config.Vast.Volume.MountPath)
     Write-Host ("Provisioned             : {0}" -f $provisioned)

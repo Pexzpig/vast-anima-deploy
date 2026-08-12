@@ -466,6 +466,20 @@ function ConvertTo-DockerEnvironmentString {
     return ($parts -join ' ')
 }
 
+function Add-VastVolumeLinkArguments {
+    param(
+        [string[]]$Arguments = @(),
+        $VolumeId,
+        [Parameter(Mandatory = $true)][string]$MountPath
+    )
+
+    $result = @($Arguments)
+    if ($null -ne $VolumeId -and [string]$VolumeId -ne '') {
+        $result += @('--link-volume', [string]$VolumeId, '--mount-path', $MountPath)
+    }
+    return $result
+}
+
 function Wait-VastInstanceRunning {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Config,

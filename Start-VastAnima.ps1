@@ -174,7 +174,7 @@ function Invoke-LauncherOperation {
             } elseif ($summary.CanResumeInstance) {
                 Write-Host "将复用已创建的持久卷 $($summary.State.volume_id)，只重试创建实例，不会重复创建卷。" -ForegroundColor Yellow
             } else {
-                Write-Host '正在实时选择同时满足 GPU、预算和持久卷条件的报价；确认前会显示实际价格。' -ForegroundColor Cyan
+                Write-Host '接下来先选择持久卷或实例磁盘，再实时搜索符合 GPU、预算及所选存储条件的报价。' -ForegroundColor Cyan
             }
             & (Join-Path $scriptsRoot 'Deploy-Example.ps1') -ConfigPath $configPath
         }

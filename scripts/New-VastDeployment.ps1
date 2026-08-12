@@ -2,7 +2,9 @@
 param(
     [string]$ConfigPath,
     [switch]$Force,
-    [int64]$OfferId = 0
+    [int64]$OfferId = 0,
+    [ValidateSet('Prompt', 'Volume', 'InstanceDisk')]
+    [string]$StorageMode = 'Prompt'
 )
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
@@ -11,6 +13,7 @@ if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'config.psd1
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 $volumeConfig = $config.Vast.Volume
 $resumeState = $null
+$usePersistentVolume = $false
 
 $existingStatePath = Resolve-ProjectPath -Path ([string]$config.Local.StatePath)
 if (Test-Path -LiteralPath $existingStatePath) {
@@ -25,6 +28,44 @@ if (Test-Path -LiteralPath $existingStatePath) {
     } else {
         Write-Warning "Replacing a previous deployment record that has no active remote resources: $existingStatePath"
     }
+}
+
+if ($null -ne $resumeState) {
+    $usePersistentVolume = $true
+    if ($StorageMode -eq 'InstanceDisk') {
+        throw "Deployment is resuming volume $($resumeState.volume_id); its storage mode cannot be changed without deleting the retained volume and creating a new deployment."
+    }
+} elseif (-not [bool]$volumeConfig.Enabled) {
+    if ($StorageMode -eq 'Volume') {
+        throw 'StorageMode=Volume was requested, but persistent volumes are disabled in this profile. Re-enable the volume in configuration first.'
+    }
+    $usePersistentVolume = $false
+    Write-Host "Storage: instance disk only ($($config.Vast.Instance.ContainerDiskGb) GB); persistent volumes are disabled in this profile." -ForegroundColor Yellow
+} elseif ($StorageMode -eq 'Volume') {
+    $usePersistentVolume = $true
+} elseif ($StorageMode -eq 'InstanceDisk') {
+    $usePersistentVolume = $false
+} else {
+    Write-Host ''
+    Write-Host 'Select deployment storage' -ForegroundColor Cyan
+    Write-Host "  1. Persistent volume ($($volumeConfig.SizeGb) GB) - models and outputs survive instance destruction (recommended)"
+    Write-Host "  2. Instance disk only ($($config.Vast.Instance.ContainerDiskGb) GB) - no separate volume; all data is lost when the instance is destroyed"
+    while ($true) {
+        $storageAnswer = (Read-Host 'Select storage [1]').Trim()
+        if (-not $storageAnswer -or $storageAnswer -eq '1') {
+            $usePersistentVolume = $true
+            break
+        }
+        if ($storageAnswer -eq '2') {
+            $usePersistentVolume = $false
+            break
+        }
+        Write-Warning 'Enter 1 or 2.'
+    }
+}
+
+if (-not $usePersistentVolume) {
+    Write-Warning "This deployment will use only the $($config.Vast.Instance.ContainerDiskGb) GB instance disk. Destroying the instance permanently deletes ComfyUI, models, workflows, Codex configuration, and outputs."
 }
 
 # This is intentionally called on every deployment so the saved scope is
@@ -54,7 +95,10 @@ $remainingOffers = @($eligibleOffers)
 
 while ($null -eq $selectedOffer) {
     if ($remainingOffers.Count -eq 0) {
-        throw 'None of the selected GPU candidates also satisfied the persistent-volume requirements.'
+        if ($usePersistentVolume) {
+            throw 'None of the selected GPU candidates also satisfied the persistent-volume requirements.'
+        }
+        throw 'No eligible GPU candidates remain.'
     }
 
     Write-Host ''
@@ -82,7 +126,7 @@ while ($null -eq $selectedOffer) {
         }
     }
 
-    if ($null -ne $resumeState -or -not [bool]$volumeConfig.Enabled) {
+    if ($null -ne $resumeState -or -not $usePersistentVolume) {
         $selectedOffer = $offer
         break
     }
@@ -122,7 +166,8 @@ while ($null -eq $selectedOffer) {
 }
 
 if ($null -eq $selectedOffer) {
-    throw 'No matched GPU offer also satisfied the hourly ceiling and volume requirements. Run Start-VastAnima.ps1 -Action Configure to adjust the stored scope.'
+    $requirementText = if ($usePersistentVolume) { 'hourly ceiling and volume requirements' } else { 'hourly ceiling' }
+    throw "No matched GPU offer satisfied the $requirementText. Run Start-VastAnima.ps1 -Action Configure to adjust the stored scope."
 }
 
 $offerId = [int64](Get-ObjectProperty -Object $selectedOffer -Names @('id'))
@@ -154,6 +199,10 @@ if ($null -ne $resumeState) {
     Write-Host "  Volume: $($volumeConfig.SizeGb) GB | $(Format-UsdPrice -Amount $storageUsdPerGbMonth) USD/GB/month | approximately $(Format-UsdPrice -Amount $volumeMonthlyUsd -Decimals 2) USD/month"
     Write-Host "  Estimated combined rate: $(Format-UsdPrice -Amount $estimatedTotalHourlyUsd) USD/hour"
     Write-Host '  The persistent volume continues billing after the instance is stopped or destroyed.' -ForegroundColor Yellow
+} else {
+    Write-Host "  Storage: instance disk only | $($config.Vast.Instance.ContainerDiskGb) GB | no separate persistent volume"
+    Write-Host "  Estimated combined rate: $(Format-UsdPrice -Amount $estimatedTotalHourlyUsd) USD/hour (no separate volume rate)"
+    Write-Host '  Destroying the instance permanently deletes all files stored on its instance disk.' -ForegroundColor Yellow
 }
 Write-Host "  Configured instance ceiling: $(Format-UsdPrice -Amount ([double]$config.Vast.Search.MaxHourlyUsd) -Decimals 2) USD/hour"
 
@@ -171,6 +220,11 @@ if ($null -ne $resumeState) {
     $state.hourly_usd = $hourlyPrice
     $state.volume_monthly_usd = $volumeMonthlyUsd
     $state.estimated_total_hourly_usd = $estimatedTotalHourlyUsd
+    if ($state.PSObject.Properties.Name -contains 'storage_mode') {
+        $state.storage_mode = 'volume'
+    } else {
+        $state | Add-Member -NotePropertyName storage_mode -NotePropertyValue 'volume'
+    }
     $state.instance_status = 'pending'
     $state.provisioned = $false
     $state.provisioned_at = $null
@@ -191,7 +245,8 @@ if ($null -ne $resumeState) {
         estimated_total_hourly_usd = $estimatedTotalHourlyUsd
         volume_id = $null
         volume_label = $null
-        volume_status = if ([bool]$volumeConfig.Enabled) { 'pending' } else { 'disabled' }
+        volume_status = if ($usePersistentVolume) { 'pending' } else { 'disabled' }
+        storage_mode = if ($usePersistentVolume) { 'volume' } else { 'instance_disk' }
         instance_id = $null
         instance_status = 'pending'
         provisioned = $false
@@ -205,7 +260,7 @@ if ($null -ne $resumeState) {
 }
 Save-DeploymentState -Config $config -State $state | Out-Null
 
-if ([bool]$volumeConfig.Enabled -and $null -eq $resumeState) {
+if ($usePersistentVolume -and $null -eq $resumeState) {
     $volumeOfferId = [int64](Get-ObjectProperty -Object $selectedVolumeOffer -Names @('id'))
     $volumeLabel = '{0}_{1}' -f $volumeConfig.LabelPrefix, (Get-Date -Format 'yyyyMMdd_HHmmss')
     $volumeResponse = Invoke-VastJson -Config $config -Arguments @(
@@ -231,12 +286,10 @@ $createArguments = @(
     '--env', (ConvertTo-DockerEnvironmentString -Environment $config.Vast.Instance.Environment),
     '--raw'
 )
-if ($null -ne $state.volume_id) {
-    $createArguments += @(
-        '--link-volume', [string]$state.volume_id,
-        '--mount-path', [string]$volumeConfig.MountPath
-    )
-}
+$createArguments = @(Add-VastVolumeLinkArguments `
+    -Arguments $createArguments `
+    -VolumeId $state.volume_id `
+    -MountPath ([string]$volumeConfig.MountPath))
 
 try {
     $instanceResponse = Invoke-VastJson -Config $config -Arguments $createArguments

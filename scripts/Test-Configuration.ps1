@@ -43,6 +43,7 @@ Write-Host 'Configuration is valid.' -ForegroundColor Green
 Write-Host "Stored GPU search scope: $($config.Vast.Search.Query)"
 Write-Host "Container image: $($config.Vast.Instance.Image)"
 Write-Host "ComfyUI installation mode: $installationMode"
-Write-Host "Volume: $($config.Vast.Volume.SizeGb) GB at $($config.Vast.Volume.MountPath)"
+Write-Host "Instance disk: $($config.Vast.Instance.ContainerDiskGb) GB"
+Write-Host "Persistent volume option: $(if ([bool]$config.Vast.Volume.Enabled) { "$($config.Vast.Volume.SizeGb) GB at $($config.Vast.Volume.MountPath)" } else { 'disabled' })"
 Write-Host "ComfyUI: $($config.ComfyUI.ListenHost):$($config.ComfyUI.Port)"
 Write-Host "Codex: $($config.Codex.SandboxMode), approvals $($config.Codex.ApprovalPolicy), auth $($config.Codex.AuthMode)"

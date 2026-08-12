@@ -2,7 +2,9 @@
 param(
     [string]$ConfigPath,
     [switch]$Force,
-    [int64]$OfferId = 0
+    [int64]$OfferId = 0,
+    [ValidateSet('Prompt', 'Volume', 'InstanceDisk')]
+    [string]$StorageMode = 'Prompt'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -33,6 +35,7 @@ if (Test-Path -LiteralPath $statePath -PathType Leaf) {
 $deploymentArguments = @{
     ConfigPath = $ConfigPath
     Force = $Force
+    StorageMode = $StorageMode
 }
 if ($OfferId -gt 0) { $deploymentArguments.OfferId = $OfferId }
 & (Join-Path $PSScriptRoot 'New-VastDeployment.ps1') @deploymentArguments

@@ -20,4 +20,8 @@ Invoke-VastText -Config $config -Arguments @('destroy', 'instance', [string]$sta
 $state.instance_status = 'destroyed'
 $state.destroyed_at = (Get-Date).ToUniversalTime().ToString('o')
 Save-DeploymentState -Config $config -State $state | Out-Null
-Write-Host "Instance $($state.instance_id) was destroyed. A separately created volume is retained." -ForegroundColor Yellow
+if ($null -ne $state.volume_id -and [string]$state.volume_status -ne 'deleted') {
+    Write-Host "Instance $($state.instance_id) was destroyed. Separately created volume $($state.volume_id) is retained." -ForegroundColor Yellow
+} else {
+    Write-Host "Instance $($state.instance_id) was destroyed. It had no persistent volume; its instance-disk data is permanently lost." -ForegroundColor Yellow
+}

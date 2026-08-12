@@ -5,7 +5,9 @@ param(
     [string]$Action = 'Deploy',
     [switch]$Force,
     [Security.SecureString]$ApiKey,
-    [int64]$OfferId = 0
+    [int64]$OfferId = 0,
+    [ValidateSet('Prompt', 'Volume', 'InstanceDisk')]
+    [string]$StorageMode = 'Prompt'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,7 +27,7 @@ switch ($Action) {
     'Search' { & (Join-Path $scriptRoot 'Search-VastOffers.ps1') -ConfigPath $configPath }
     'Deploy' {
         & (Join-Path $scriptRoot 'Initialize-Environment.ps1') -ConfigPath $configPath | Out-Host
-        $arguments = @{ ConfigPath = $configPath; Force = $Force }
+        $arguments = @{ ConfigPath = $configPath; Force = $Force; StorageMode = $StorageMode }
         if ($OfferId -gt 0) { $arguments.OfferId = $OfferId }
         & (Join-Path $scriptRoot 'Deploy-Example.ps1') @arguments
     }
