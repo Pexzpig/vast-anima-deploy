@@ -12,31 +12,18 @@ $projectRoot = $PSScriptRoot
 $scriptsRoot = Join-Path $projectRoot 'scripts'
 . (Join-Path $scriptsRoot 'Common.ps1')
 
-function Get-SelectedDeployment {
+function Resolve-DeploymentConfigPath {
     param([string]$RequestedConfigPath)
 
     if ($RequestedConfigPath) {
-        return [pscustomobject]@{
-            Deployment = 'custom'
-            ConfigPath = Resolve-ProjectPath -Path $RequestedConfigPath
-        }
+        return Resolve-ProjectPath -Path $RequestedConfigPath
     }
 
-    $launcherPath = Resolve-ProjectPath -Path 'user-config/launcher.json'
-    if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
+    $canonicalPath = Resolve-ProjectPath -Path 'user-config/deployment.json'
+    if (-not (Test-Path -LiteralPath $canonicalPath -PathType Leaf)) {
         throw 'Deployment configuration has not been initialized. Run .\Start-VastAnima.ps1 first.'
     }
-
-    $launcher = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if (-not $launcher.config_path) {
-        throw "Launcher configuration does not contain config_path: $launcherPath"
-    }
-
-    $deployment = [string](Get-ObjectProperty -Object $launcher -Names @('deployment', 'profile') -Default 'pytorch-ui')
-    return [pscustomobject]@{
-        Deployment = $deployment
-        ConfigPath = Resolve-ProjectPath -Path ([string]$launcher.config_path)
-    }
+    return $canonicalPath
 }
 
 function Get-LiveInstance {
@@ -74,7 +61,7 @@ function Get-RemoteInteractiveCommand {
 
 function Show-DeploymentConnectionSummary {
     param(
-        [Parameter(Mandatory = $true)]$Selection,
+        [Parameter(Mandatory = $true)][string]$ResolvedConfigPath,
         [Parameter(Mandatory = $true)][hashtable]$Config,
         [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)][string]$LiveStatus,
@@ -84,16 +71,15 @@ function Show-DeploymentConnectionSummary {
     $hourlyUsd = Get-ObjectProperty -Object $State -Names @('hourly_usd')
     $volumeMonthlyUsd = Get-ObjectProperty -Object $State -Names @('volume_monthly_usd')
     $combinedHourlyUsd = Get-ObjectProperty -Object $State -Names @('estimated_total_hourly_usd')
-    $provisioned = [bool](Get-ObjectProperty -Object $State -Names @('provisioned') -Default $false)
+    $provisioned = [bool]$State.provisioned
     $application = Get-DeploymentApplication -Config $Config -State $State
-    $deploymentImage = [string](Get-ObjectProperty -Object $State -Names @('deployment_image') -Default $Config.Vast.Instance.Image)
+    $deploymentImage = [string]$State.deployment_image
 
     Write-Host ''
     Write-Host ('=' * 68) -ForegroundColor DarkCyan
     Write-Host ' Vast.ai instance / remote CLI' -ForegroundColor Cyan
     Write-Host ('=' * 68) -ForegroundColor DarkCyan
-    Write-Host ("Deployment              : {0}" -f $Selection.Deployment)
-    Write-Host ("Config                  : {0}" -f $Selection.ConfigPath)
+    Write-Host ("Config                  : {0}" -f $ResolvedConfigPath)
     Write-Host ("Image                   : {0}" -f $deploymentImage)
     Write-Host ("Application             : {0}" -f $application.DisplayName)
     Write-Host ("Instance                : {0} ({1})" -f $State.instance_id, $LiveStatus)
@@ -138,8 +124,8 @@ function Show-DeploymentConnectionSummary {
     }
 }
 
-$selection = Get-SelectedDeployment -RequestedConfigPath $ConfigPath
-$config = Get-DeployConfig -ConfigPath $selection.ConfigPath
+$resolvedConfigPath = Resolve-DeploymentConfigPath -RequestedConfigPath $ConfigPath
+$config = Get-DeployConfig -ConfigPath $resolvedConfigPath
 $state = Get-DeploymentState -Config $config
 
 if ($null -eq $state.instance_id) {
@@ -154,14 +140,14 @@ $instance = Get-LiveInstance -Config $config -InstanceId ([int64]$state.instance
 $liveStatus = [string](Get-ObjectProperty -Object $instance -Names @('actual_status', 'status', 'cur_state') -Default 'unknown')
 
 if ($liveStatus -ne 'running') {
-    Show-DeploymentConnectionSummary -Selection $selection -Config $config -State $state -LiveStatus $liveStatus -Endpoint $null
+    Show-DeploymentConnectionSummary -ResolvedConfigPath $resolvedConfigPath -Config $config -State $state -LiveStatus $liveStatus -Endpoint $null
     if (-not $StartIfStopped) {
         throw "Instance $($state.instance_id) is '$liveStatus'. Re-run with -StartIfStopped to start this paid instance and connect."
     }
 
     Write-Host ''
     Write-Host "Starting existing instance $($state.instance_id); GPU billing will resume." -ForegroundColor Yellow
-    & (Join-Path $scriptsRoot 'Start-VastInstance.ps1') -ConfigPath $selection.ConfigPath
+    & (Join-Path $scriptsRoot 'Start-VastInstance.ps1') -ConfigPath $resolvedConfigPath
     $state = Get-DeploymentState -Config $config
     $instance = Get-LiveInstance -Config $config -InstanceId ([int64]$state.instance_id)
     $liveStatus = [string](Get-ObjectProperty -Object $instance -Names @('actual_status', 'status', 'cur_state') -Default 'unknown')
@@ -172,7 +158,7 @@ if ($liveStatus -ne 'running') {
 }
 
 $endpoint = Get-VastSshEndpoint -Config $config -InstanceId ([int64]$state.instance_id)
-Show-DeploymentConnectionSummary -Selection $selection -Config $config -State $state -LiveStatus $liveStatus -Endpoint $endpoint
+Show-DeploymentConnectionSummary -ResolvedConfigPath $resolvedConfigPath -Config $config -State $state -LiveStatus $liveStatus -Endpoint $endpoint
 
 Write-Host ''
 $application = Get-DeploymentApplication -Config $config -State $state

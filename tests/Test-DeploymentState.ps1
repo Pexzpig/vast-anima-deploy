@@ -3,6 +3,84 @@ param()
 
 . (Join-Path $PSScriptRoot '..\scripts\Common.ps1')
 
+function New-ValidDeploymentState {
+    return [pscustomobject][ordered]@{
+        schema_version = 2
+        created_at = '2026-08-12T00:00:00Z'
+        updated_at = '2026-08-12T00:00:00Z'
+        search_query = 'gpu_name in [RTX_4090]'
+        offer_id = 100
+        machine_id = 200
+        gpu_name = 'RTX_4090'
+        hourly_usd = 0.5
+        volume_monthly_usd = 0
+        estimated_total_hourly_usd = 0.5
+        volume_id = $null
+        volume_label = $null
+        volume_status = 'disabled'
+        storage_mode = 'instance_disk'
+        application_type = 'comfyui'
+        deployment_image = 'vastai/pytorch:cuda-12.8.1-auto'
+        instance_id = 300
+        instance_status = 'running'
+        provisioned = $false
+        provisioned_at = $null
+        ssh_host = $null
+        ssh_port = $null
+        last_error = $null
+        destroyed_at = $null
+        volume_deleted_at = $null
+    }
+}
+
+$validState = New-ValidDeploymentState
+if ((Assert-DeploymentState -State $validState).schema_version -ne 2) {
+    throw 'The current deployment-state schema was rejected.'
+}
+
+$invalidSchema = New-ValidDeploymentState
+$invalidSchema.schema_version = 1
+$invalidSchemaRejected = $false
+try {
+    Assert-DeploymentState -State $invalidSchema | Out-Null
+} catch {
+    $invalidSchemaRejected = $true
+    if ($_.Exception.Message -notmatch 'schema_version') { throw }
+}
+if (-not $invalidSchemaRejected) { throw 'An obsolete deployment-state schema was accepted.' }
+
+$missingApplication = New-ValidDeploymentState | Select-Object * -ExcludeProperty application_type
+$missingApplicationRejected = $false
+try {
+    Assert-DeploymentState -State $missingApplication | Out-Null
+} catch {
+    $missingApplicationRejected = $true
+    if ($_.Exception.Message -notmatch 'application_type') { throw }
+}
+if (-not $missingApplicationRejected) { throw 'A deployment state missing application_type was accepted.' }
+
+$invalidStorage = New-ValidDeploymentState
+$invalidStorage.storage_mode = 'obsolete'
+$invalidStorageRejected = $false
+try {
+    Assert-DeploymentState -State $invalidStorage | Out-Null
+} catch {
+    $invalidStorageRejected = $true
+    if ($_.Exception.Message -notmatch 'storage_mode') { throw }
+}
+if (-not $invalidStorageRejected) { throw 'An unsupported storage mode was accepted.' }
+
+$stateTestDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("vast-anima-state-{0}" -f [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stateTestDirectory | Out-Null
+try {
+    $stateTestPath = Join-Path $stateTestDirectory 'deployment.json'
+    Save-JsonFile -Value (New-ValidDeploymentState) -Path $stateTestPath | Out-Null
+    $loadedState = Get-DeploymentState -Config @{ Local = @{ StatePath = $stateTestPath } }
+    if ($loadedState.application_type -ne 'comfyui') { throw 'A valid current state could not be loaded.' }
+} finally {
+    Remove-Item -LiteralPath $stateTestDirectory -Recurse -Force
+}
+
 $incomplete = [pscustomobject]@{
     instance_id = $null
     instance_status = 'pending'
@@ -117,6 +195,8 @@ $choiceRows = @(ConvertTo-VastOfferChoiceRows -Offers @(
         dph_total = 0.5907222222
         reliability2 = 0.9970279
         inet_down = 851.4
+        public_ipaddr = '203.0.113.10'
+        geolocation = 'Germany, DE'
         machine_id = 33732
     },
     [pscustomobject]@{
@@ -126,15 +206,22 @@ $choiceRows = @(ConvertTo-VastOfferChoiceRows -Offers @(
         dph_total = 0.6009259259
         reliability2 = 0.9980183
         inet_down = 587.6
+        public_ipaddr = '198.51.100.20'
+        geolocation = 'Türkiye, TR'
         machine_id = 41600
     }
 ))
 if ($choiceRows.Count -ne 2 -or
     $choiceRows[0].choice -ne 1 -or
     $choiceRows[0].price_USD_hour -ne '$0.5907' -or
+    $choiceRows[0].ip -ne '203.0.113.10' -or
+    $choiceRows[0].region -ne 'Germany, DE' -or
     $choiceRows[1].choice -ne 2 -or
-    $choiceRows[1].offer_id -ne 24964768) {
-    throw 'GPU offer choices were not numbered or priced correctly.'
+    $choiceRows[1].ip -ne '198.51.100.20' -or
+    $choiceRows[1].region -ne 'Türkiye, TR' -or
+    $choiceRows[1].PSObject.Properties.Name -contains 'offer_id' -or
+    $choiceRows[1].PSObject.Properties.Name -contains 'machine_id') {
+    throw 'GPU offer choices did not show IP/region or exposed internal IDs.'
 }
 
 # A start request is asynchronous. The first show-instance response can still

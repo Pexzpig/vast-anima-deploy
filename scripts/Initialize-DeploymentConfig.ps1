@@ -59,6 +59,32 @@ $recommendedGpus = @(
     'H100_PCIE', 'H100_SXM', 'H100_NVL', 'H200', 'H200_NVL', 'B200'
 )
 
+$relativeConfigPath = 'user-config/deployment.json'
+$resolvedConfigPath = Resolve-ProjectPath -Path $relativeConfigPath
+$configExists = Test-Path -LiteralPath $resolvedConfigPath -PathType Leaf
+$config = if ($configExists) {
+    Get-DeployConfig -ConfigPath $resolvedConfigPath
+} else {
+    Get-DeployConfig -ConfigPath 'config.psd1'
+}
+$defaultApplicationType = if ([string]$config.Application.DefaultType -eq 'webui') { 'WebUI' } else { 'ComfyUI' }
+$defaultGpuNames = $recommendedGpus
+
+if ($configExists -and -not $UseDefaults) {
+    $storedQuery = [string]$config.Vast.Search.Query
+    if (-not $PSBoundParameters.ContainsKey('GpuNames') -and $storedQuery -match 'gpu_name\s+in\s+\[([^\]]+)\]') {
+        $defaultGpuNames = @($Matches[1] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    if (-not $PSBoundParameters.ContainsKey('MinGpuRamGb') -and $storedQuery -match 'gpu_ram>=([0-9.]+)') { $MinGpuRamGb = [double]::Parse($Matches[1], $script:InvariantCulture) }
+    if (-not $PSBoundParameters.ContainsKey('MinReliability') -and $storedQuery -match 'reliability>=([0-9.]+)') { $MinReliability = [double]::Parse($Matches[1], $script:InvariantCulture) }
+    if (-not $PSBoundParameters.ContainsKey('MinDownloadMbps') -and $storedQuery -match 'inet_down>=([0-9.]+)') { $MinDownloadMbps = [double]::Parse($Matches[1], $script:InvariantCulture) }
+    if (-not $PSBoundParameters.ContainsKey('MinCudaVersion') -and $storedQuery -match 'cuda_vers>=([0-9.]+)') { $MinCudaVersion = [double]::Parse($Matches[1], $script:InvariantCulture) }
+    if (-not $PSBoundParameters.ContainsKey('MaxHourlyUsd')) { $MaxHourlyUsd = [double]$config.Vast.Search.MaxHourlyUsd }
+    if (-not $PSBoundParameters.ContainsKey('SearchLimit')) { $SearchLimit = [int]$config.Vast.Search.Limit }
+    if (-not $PSBoundParameters.ContainsKey('VolumeSizeGb')) { $VolumeSizeGb = [int]$config.Vast.Volume.SizeGb }
+    if (-not $PSBoundParameters.ContainsKey('DisableVolume')) { $DisableVolume = -not [bool]$config.Vast.Volume.Enabled }
+}
+
 function Write-WizardPage {
     param([int]$Page, [int]$Total, [string]$Title)
 
@@ -130,7 +156,7 @@ function Read-GpuSelection {
     )
 
     $presets = @(
-        [pscustomobject]@{ Label = '推荐的广泛兼容型号'; Gpus = $Recommended }
+        [pscustomobject]@{ Label = '当前/推荐的型号范围'; Gpus = $Recommended }
         [pscustomobject]@{ Label = $Groups.Consumer.Label; Gpus = $Groups.Consumer.Gpus }
         [pscustomobject]@{ Label = $Groups.AdaPro.Label; Gpus = $Groups.AdaPro.Gpus }
         [pscustomobject]@{ Label = $Groups.RtxA.Label; Gpus = $Groups.RtxA.Gpus }
@@ -203,17 +229,18 @@ function Read-GpuSelection {
 if (-not $UseDefaults) {
     Write-WizardPage -Page 1 -Total 4 -Title '默认远端应用'
     if (-not $ApplicationType) {
+        $defaultApplicationIndex = if ($defaultApplicationType -eq 'WebUI') { 2 } else { 1 }
         $applicationChoice = Read-WizardChoice -Prompt '请选择默认应用' -Options @(
             'ComfyUI + Anima workflow',
             'Forge Classic WebUI（neo 分支）'
-        ) -DefaultIndex 1
+        ) -DefaultIndex $defaultApplicationIndex
         $ApplicationType = if ($applicationChoice -eq 1) { 'ComfyUI' } else { 'WebUI' }
     }
     Write-Host ("默认应用：{0}" -f $ApplicationType) -ForegroundColor Green
 
     Write-WizardPage -Page 2 -Total 4 -Title 'GPU 与预算'
     if (-not $GpuNames -or $GpuNames.Count -eq 0) {
-        $GpuNames = Read-GpuSelection -Groups $gpuGroups -Recommended $recommendedGpus -AvailableGpus $supportedGpus
+        $GpuNames = Read-GpuSelection -Groups $gpuGroups -Recommended $defaultGpuNames -AvailableGpus $supportedGpus
     }
     $MinGpuRamGb = Read-WizardNumber -Prompt '最低显存（GB）' -Default $MinGpuRamGb -Minimum 12 -Maximum 192
     $MaxHourlyUsd = Read-WizardNumber -Prompt '最高每小时价格（USD）' -Default $MaxHourlyUsd -Minimum 0.05 -Maximum 20
@@ -225,21 +252,19 @@ if (-not $UseDefaults) {
     $SearchLimit = [int](Read-WizardNumber -Prompt '最多读取多少个报价' -Default $SearchLimit -Minimum 5 -Maximum 200)
 
     Write-WizardPage -Page 4 -Total 4 -Title '持久卷'
-    $volumeEnabled = Read-WizardYesNo -Prompt '启用持久卷保存模型和输出吗？' -Default $true
+    $volumeEnabled = Read-WizardYesNo -Prompt '启用持久卷保存模型和输出吗？' -Default (-not [bool]$DisableVolume)
     $DisableVolume = -not $volumeEnabled
     if ($volumeEnabled) {
         $VolumeSizeGb = [int](Read-WizardNumber -Prompt '持久卷大小（GB）' -Default $VolumeSizeGb -Minimum 50 -Maximum 2048)
     }
 } else {
-    if (-not $ApplicationType) { $ApplicationType = 'ComfyUI' }
+    if (-not $ApplicationType) { $ApplicationType = $defaultApplicationType }
     if (-not $GpuNames -or $GpuNames.Count -eq 0) { $GpuNames = $recommendedGpus }
 }
 
 $unknownGpus = @($GpuNames | Where-Object { $_ -notin $supportedGpus })
 if ($unknownGpus.Count -gt 0) { throw "不支持的 GPU 名称：$($unknownGpus -join ', ')" }
 
-$templatePath = 'config.psd1'
-$config = Get-DeployConfig -ConfigPath $templatePath
 $queryParts = @(
     ('gpu_name in [{0}]' -f ($GpuNames -join ','))
     'num_gpus=1'
@@ -253,25 +278,20 @@ $queryParts = @(
     ('cuda_vers>={0}' -f $MinCudaVersion.ToString('0.####', $script:InvariantCulture))
     ('dph_total<={0}' -f $MaxHourlyUsd.ToString('0.####', $script:InvariantCulture))
 )
-$config.Vast.Search.Query = $queryParts -join ' '
-$config.Vast.Search.Limit = $SearchLimit
-$config.Vast.Search.MaxHourlyUsd = $MaxHourlyUsd
-$config.Vast.Volume.Enabled = -not [bool]$DisableVolume
-$config.Vast.Volume.SizeGb = $VolumeSizeGb
-$config.Application.DefaultType = $ApplicationType.ToLowerInvariant()
+$config = Set-DeploymentSearchPreferences `
+    -Config $config `
+    -Query ($queryParts -join ' ') `
+    -SearchLimit $SearchLimit `
+    -MaxHourlyUsd $MaxHourlyUsd `
+    -VolumeEnabled (-not [bool]$DisableVolume) `
+    -VolumeSizeGb $VolumeSizeGb `
+    -ApplicationType $ApplicationType.ToLowerInvariant()
 
-$relativeConfigPath = 'user-config/deployment.json'
-$resolvedConfigPath = Resolve-ProjectPath -Path $relativeConfigPath
 if ((Test-Path -LiteralPath $resolvedConfigPath) -and -not $Force -and $UseDefaults) {
     throw "配置已存在：$resolvedConfigPath。若要覆盖，请使用 -Force。"
 }
 
 Save-JsonFile -Path $relativeConfigPath -Value $config | Out-Null
-Save-JsonFile -Path 'user-config/launcher.json' -Value ([ordered]@{
-    deployment = 'pytorch-ui'
-    config_path = $relativeConfigPath
-    initialized_at = (Get-Date).ToUniversalTime().ToString('o')
-}) | Out-Null
 
 Write-Host ''
 Write-Host '初始化完成。' -ForegroundColor Green
@@ -282,7 +302,6 @@ Write-Host ('价格上限：${0}/小时' -f $MaxHourlyUsd.ToString('0.####', $sc
 Write-Host "持久卷：$(if ($config.Vast.Volume.Enabled) { "$VolumeSizeGb GB" } else { '关闭' })"
 
 [pscustomobject]@{
-    Deployment = 'pytorch-ui'
     ApplicationType = $ApplicationType
     ConfigPath = $relativeConfigPath
     ResolvedConfigPath = $resolvedConfigPath

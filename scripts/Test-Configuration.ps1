@@ -2,7 +2,7 @@
 param([string]$ConfigPath)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
-if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'config.psd1' }
+if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 
 $errors = New-Object System.Collections.Generic.List[string]
@@ -45,11 +45,13 @@ if ([string]$config.Codex.ApprovalPolicy -notin @('untrusted', 'on-request', 'ne
 if ([string]$config.Codex.SandboxMode -notin @('read-only', 'workspace-write', 'danger-full-access')) { $errors.Add('Unsupported Codex sandbox mode.') }
 if ([string]$config.Codex.AuthMode -notin @('device', 'api-key')) { $errors.Add('Codex.AuthMode must be device or api-key.') }
 if ([string]$config.Codex.ApiKeyEnvironmentVariable -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { $errors.Add('Codex.ApiKeyEnvironmentVariable is invalid.') }
-$provisionScriptPath = if ($config.Local.ContainsKey('ProvisionScriptPath')) { [string]$config.Local.ProvisionScriptPath } else { 'remote/provision.sh' }
-$codexScriptPath = if ($config.Local.ContainsKey('CodexScriptPath')) { [string]$config.Local.CodexScriptPath } else { 'remote/configure-codex.sh' }
+$provisionScriptPath = if ($config.Local.ContainsKey('ProvisionScriptPath')) { [string]$config.Local.ProvisionScriptPath } else { '' }
+$codexScriptPath = if ($config.Local.ContainsKey('CodexScriptPath')) { [string]$config.Local.CodexScriptPath } else { '' }
 $verifyScriptPath = 'remote/verify-deployment.sh'
-if (-not (Test-Path -LiteralPath (Resolve-ProjectPath -Path $provisionScriptPath) -PathType Leaf)) { $errors.Add("Provision script not found: $provisionScriptPath") }
-if (-not (Test-Path -LiteralPath (Resolve-ProjectPath -Path $codexScriptPath) -PathType Leaf)) { $errors.Add("Codex script not found: $codexScriptPath") }
+if (-not $provisionScriptPath) { $errors.Add('Local.ProvisionScriptPath is required.') }
+if (-not $codexScriptPath) { $errors.Add('Local.CodexScriptPath is required.') }
+if ($provisionScriptPath -and -not (Test-Path -LiteralPath (Resolve-ProjectPath -Path $provisionScriptPath) -PathType Leaf)) { $errors.Add("Provision script not found: $provisionScriptPath") }
+if ($codexScriptPath -and -not (Test-Path -LiteralPath (Resolve-ProjectPath -Path $codexScriptPath) -PathType Leaf)) { $errors.Add("Codex script not found: $codexScriptPath") }
 if (-not (Test-Path -LiteralPath (Resolve-ProjectPath -Path $verifyScriptPath) -PathType Leaf)) { $errors.Add("Verification script not found: $verifyScriptPath") }
 if ([string]$config.Local.RemoteUploadDirectory -notmatch '^/[A-Za-z0-9._/-]+$') { $errors.Add('Local.RemoteUploadDirectory contains unsupported shell characters.') }
 

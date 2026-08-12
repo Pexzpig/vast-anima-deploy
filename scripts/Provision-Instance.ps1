@@ -2,11 +2,11 @@
 param([string]$ConfigPath)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
-if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'config.psd1' }
+if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 $state = Get-DeploymentState -Config $config
 $application = Get-DeploymentApplication -Config $config -State $state
-$deploymentImage = [string](Get-ObjectProperty -Object $state -Names @('deployment_image') -Default $config.Vast.Instance.Image)
+$deploymentImage = [string]$state.deployment_image
 if ($deploymentImage -ne [string]$config.Vast.Instance.Image -and $state.instance_id -and [string]$state.instance_status -ne 'destroyed') {
     throw "Instance $($state.instance_id) was created from '$deploymentImage', but the current template is '$($config.Vast.Instance.Image)'. Keep managing the existing instance or destroy it before creating a PyTorch-based deployment; an instance image cannot be replaced in place."
 }
@@ -17,6 +17,7 @@ Write-Host '[local 1/5] Waiting for the Vast.ai instance and resolving its SSH e
 Wait-VastInstanceRunning -Config $config -InstanceId $state.instance_id | Out-Null
 $endpoint = Get-VastSshEndpoint -Config $config -InstanceId $state.instance_id
 $sshCommon = @(Get-SshCommonArguments -Config $config)
+$automatedSshCommon = $sshCommon + @('-o', 'LogLevel=QUIET')
 Wait-VastSshReady -Config $config -Endpoint $endpoint
 
 Write-Host '[local 2/5] Generating the remote deployment configuration...' -ForegroundColor Cyan
@@ -79,16 +80,8 @@ $remoteConfig = [ordered]@{
 
 $generatedConfig = Save-JsonFile -Value $remoteConfig -Path ([string]$config.Local.GeneratedRemoteConfigPath)
 $remoteUploadDirectory = [string]$config.Local.RemoteUploadDirectory
-$provisionScriptPath = if ($config.Local.ContainsKey('ProvisionScriptPath')) {
-    Resolve-ProjectPath -Path ([string]$config.Local.ProvisionScriptPath)
-} else {
-    Join-Path $script:ProjectRoot 'remote/provision.sh'
-}
-$codexScriptPath = if ($config.Local.ContainsKey('CodexScriptPath')) {
-    Resolve-ProjectPath -Path ([string]$config.Local.CodexScriptPath)
-} else {
-    Join-Path $script:ProjectRoot 'remote/configure-codex.sh'
-}
+$provisionScriptPath = Resolve-ProjectPath -Path ([string]$config.Local.ProvisionScriptPath)
+$codexScriptPath = Resolve-ProjectPath -Path ([string]$config.Local.CodexScriptPath)
 $verifyScriptPath = Resolve-ProjectPath -Path 'remote/verify-deployment.sh'
 foreach ($requiredScript in @($provisionScriptPath, $codexScriptPath, $verifyScriptPath)) {
     if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
@@ -98,33 +91,30 @@ foreach ($requiredScript in @($provisionScriptPath, $codexScriptPath, $verifyScr
 
 $target = "$($endpoint.User)@$($endpoint.Host)"
 Write-Host "[local 3/5] Uploading deployment scripts to $target..." -ForegroundColor Cyan
-Invoke-NativeCommandCheckedWithRetry -Command 'ssh' -Arguments ($sshCommon + @(
-    '-p', [string]$endpoint.Port, $target, "mkdir -p '$remoteUploadDirectory/remote'"
-)) -FailureMessage 'Could not create remote upload directory.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 60
+Invoke-NativeCommandCheckedWithRetry -Command 'ssh' -Arguments ($automatedSshCommon + @(
+    '-T', '-n', '-p', [string]$endpoint.Port, $target, "mkdir -p '$remoteUploadDirectory/remote' && exit"
+)) -FailureMessage 'Could not create remote upload directory.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 60 -Quiet
 
-$scpCommon = @()
-for ($i = 0; $i -lt $sshCommon.Count; $i += 2) {
-    $scpCommon += @($sshCommon[$i], $sshCommon[$i + 1])
-}
+$scpCommon = @('-q') + $automatedSshCommon
 Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $provisionScriptPath, "${target}:$remoteUploadDirectory/remote/provision.sh"
-)) -FailureMessage 'Uploading the remote provision script failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120
+)) -FailureMessage 'Uploading the remote provision script failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120 -Quiet
 Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $codexScriptPath, "${target}:$remoteUploadDirectory/remote/configure-codex.sh"
-)) -FailureMessage 'Uploading the remote Codex script failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120
+)) -FailureMessage 'Uploading the remote Codex script failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120 -Quiet
 Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $verifyScriptPath, "${target}:$remoteUploadDirectory/remote/verify-deployment.sh"
-)) -FailureMessage 'Uploading the remote verification script failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120
+)) -FailureMessage 'Uploading the remote verification script failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120 -Quiet
 Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $generatedConfig, "${target}:$remoteUploadDirectory/remote-config.json"
-)) -FailureMessage 'Uploading remote configuration failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120
+)) -FailureMessage 'Uploading remote configuration failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120 -Quiet
 
 Write-Host '[local 4/5] Running remote provisioning; model downloads can take a long time.' -ForegroundColor Cyan
 Write-Host 'Progress and downloaded sizes will be printed below. Interrupted downloads resume from .part files.' -ForegroundColor DarkCyan
 $remoteCommand = "bash '$remoteUploadDirectory/remote/provision.sh' '$remoteUploadDirectory/remote-config.json'"
 try {
-    Invoke-NativeCommandChecked -Command 'ssh' -Arguments ($sshCommon + @(
-        '-p', [string]$endpoint.Port, $target, $remoteCommand
+    Invoke-NativeCommandChecked -Command 'ssh' -Arguments ($automatedSshCommon + @(
+        '-T', '-n', '-p', [string]$endpoint.Port, $target, $remoteCommand
     )) -FailureMessage 'Remote provisioning failed.'
 }
 catch {

@@ -21,20 +21,29 @@ if ([string]$config.WebUI.Repository -ne 'https://github.com/Haoming02/sd-webui-
     throw 'Forge Classic WebUI repository or branch is incorrect.'
 }
 
-$launcherText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Start-VastAnima.ps1') -Raw -Encoding UTF8
-if ($launcherText.Contains('SwitchProfile') -or $launcherText.Contains("'base-image'")) {
-    throw 'The launcher still exposes obsolete profile/base-image selection.'
+$entryText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Start-VastAnima.ps1') -Raw -Encoding UTF8
+if ($entryText.Contains('launcher.json') -or $entryText.Contains('profile')) {
+    throw 'The main entry point still reads an obsolete selection layer.'
 }
 foreach ($expected in @(
     "'9' = 'Test'",
     "'10' = 'Destroy'",
     "'11' = 'RemoveVolume'",
-    'application_type',
-    'deployment_image'
+    'user-config\deployment.json'
 )) {
-    if (-not $launcherText.Contains($expected)) {
-        throw "The single-deployment launcher is missing expected behavior: $expected"
+    if (-not $entryText.Contains($expected)) {
+        throw "The single-deployment entry point is missing expected behavior: $expected"
     }
+}
+
+$remoteCliText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Open-VastRemoteCli.ps1') -Raw -Encoding UTF8
+if (-not $remoteCliText.Contains('user-config/deployment.json') -or
+    $remoteCliText.Contains('launcher.json') -or
+    $remoteCliText.Contains("@('deployment', 'profile')")) {
+    throw 'The remote CLI does not resolve the canonical deployment configuration directly.'
+}
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\scripts\Open-ComfyUITunnel.ps1')) {
+    throw 'The obsolete ComfyUI-only tunnel entry point still exists.'
 }
 
 $tunnelText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\Open-AppTunnel.ps1') -Raw -Encoding UTF8

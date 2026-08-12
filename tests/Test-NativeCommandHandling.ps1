@@ -150,4 +150,26 @@ if (-not $checkedFailureCaught) {
     throw 'Invoke-NativeCommandChecked did not reject the nonzero exit code.'
 }
 
+$script:timeoutRetryCalls = 0
+function Invoke-NativeCommandCapture {
+    param([string]$Command, [string[]]$Arguments, [int]$TimeoutSeconds)
+
+    $script:timeoutRetryCalls++
+    if ($script:timeoutRetryCalls -eq 1) {
+        throw "[NATIVE_COMMAND_TIMEOUT] Command '$Command' exceeded $TimeoutSeconds seconds and was terminated."
+    }
+    return [pscustomobject]@{ ExitCode = 0; Output = @(); Text = '' }
+}
+Invoke-NativeCommandCheckedWithRetry `
+    -Command 'ssh' `
+    -Arguments @('example') `
+    -FailureMessage 'Expected retry.' `
+    -Attempts 2 `
+    -DelaySeconds 0 `
+    -TimeoutSeconds 1 `
+    -Quiet
+if ($script:timeoutRetryCalls -ne 2) {
+    throw 'A timed-out native command was not retried.'
+}
+
 Write-Host 'Native command stderr/exit-code handling passed.' -ForegroundColor Green

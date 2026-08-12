@@ -11,7 +11,7 @@ $requiredModels = @(
     'H100_PCIE', 'H100_SXM', 'H100_NVL', 'H200', 'H200_NVL', 'B200'
 )
 
-$wizardText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\Initialize-SearchProfile.ps1') -Raw -Encoding UTF8
+$wizardText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\Initialize-DeploymentConfig.ps1') -Raw -Encoding UTF8
 foreach ($model in $requiredModels) {
     if ($wizardText -notmatch ("'{0}'" -f [regex]::Escape($model))) {
         throw "GPU catalog is missing $model."

@@ -72,7 +72,7 @@ EOF
 fi
 
 login_script=/workspace/bin/codex-login.sh
-echo "[codex 3/4] Creating login and launcher helpers."
+echo "[codex 3/4] Creating login and CLI helpers."
 if [[ "$auth_mode" == 'device' ]]; then
   cat > "$login_script" <<EOF
 #!/usr/bin/env bash

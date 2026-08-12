@@ -7,7 +7,7 @@ param(
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
-if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'config.psd1' }
+if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 $cli = [string]$config.Vast.Cli
 Assert-CommandExists -Name $cli

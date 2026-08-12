@@ -7,7 +7,7 @@ param(
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
-if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'config.psd1' }
+if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 $search = $config.Vast.Search
 
@@ -36,7 +36,7 @@ Write-Host "Saved $($offers.Count) matching offers to $path" -ForegroundColor Gr
 
 if (-not $Quiet) {
     @(ConvertTo-VastOfferChoiceRows -Offers $offers) |
-        Select-Object -First 10 offer_id, gpu_name, gpu_ram_GB, price_USD_hour, reliability, inet_down_Mbps, machine_id |
+        Select-Object -First 10 choice, gpu_name, gpu_ram_GB, price_USD_hour, reliability, inet_down_Mbps, ip, region |
         Format-Table -AutoSize | Out-Host
 }
 if ($PassThru) { $offers | Write-Output }

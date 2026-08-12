@@ -7,9 +7,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 $scriptsRoot = Join-Path $projectRoot 'scripts'
+$configPath = Join-Path $projectRoot 'user-config\deployment.json'
 . (Join-Path $scriptsRoot 'Common.ps1')
 
-function Read-LauncherYesNo {
+function Read-Confirmation {
     param([string]$Prompt, [bool]$Default = $false)
 
     $hint = if ($Default) { 'Y/n' } else { 'y/N' }
@@ -22,87 +23,15 @@ function Read-LauncherYesNo {
     }
 }
 
-function Get-LauncherSelection {
-    $path = Resolve-ProjectPath -Path 'user-config/launcher.json'
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    return Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-}
+function Update-DeploymentSshIdentity {
+    param([string]$PrivateKeyPath)
 
-function Update-LauncherSshIdentity {
-    param($Selection, [string]$PrivateKeyPath)
-
-    if ($null -eq $Selection -or -not $PrivateKeyPath) { return }
-    $configPath = Resolve-ProjectPath -Path ([string]$Selection.config_path)
-    if ([System.IO.Path]::GetExtension($configPath) -ine '.json') { return }
-    $selectedConfig = Get-DeployConfig -ConfigPath $configPath
-    if ([string]$selectedConfig.Vast.Ssh.IdentityFile -eq $PrivateKeyPath) { return }
-    $selectedConfig.Vast.Ssh.IdentityFile = $PrivateKeyPath
-    Save-JsonFile -Path $configPath -Value $selectedConfig | Out-Null
+    if (-not $PrivateKeyPath -or -not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return }
+    $config = Get-DeployConfig -ConfigPath $configPath
+    if ([string]$config.Vast.Ssh.IdentityFile -eq $PrivateKeyPath) { return }
+    $config.Vast.Ssh.IdentityFile = $PrivateKeyPath
+    Save-JsonFile -Path $configPath -Value $config | Out-Null
     Write-Host "当前部署配置已绑定 SSH 私钥：$PrivateKeyPath" -ForegroundColor Green
-}
-
-function Initialize-SingleDeploymentConfiguration {
-    $canonicalRelativePath = 'user-config/deployment.json'
-    $canonicalPath = Resolve-ProjectPath -Path $canonicalRelativePath
-    $legacySelection = Get-LauncherSelection
-    $legacyConfig = $null
-    $legacyConfigPath = $null
-
-    if ($null -ne $legacySelection -and $legacySelection.config_path) {
-        $legacyConfigPath = Resolve-ProjectPath -Path ([string]$legacySelection.config_path)
-        if (Test-Path -LiteralPath $legacyConfigPath -PathType Leaf) {
-            $legacyConfig = Get-DeployConfig -ConfigPath $legacyConfigPath
-        }
-    }
-
-    if (-not (Test-Path -LiteralPath $canonicalPath -PathType Leaf) -and $null -ne $legacyConfig) {
-        Write-Host '检测到旧版多配置结构，正在迁移为单一 PyTorch 部署配置...' -ForegroundColor Cyan
-        $config = Get-DeployConfig -ConfigPath 'config.psd1'
-
-        $config.Vast.Search = $legacyConfig.Vast.Search
-        $config.Vast.Search.LastSearchPath = 'state/last-search.json'
-        $config.Vast.Volume.Enabled = [bool]$legacyConfig.Vast.Volume.Enabled
-        $config.Vast.Volume.SizeGb = [int]$legacyConfig.Vast.Volume.SizeGb
-        $config.Vast.Ssh.IdentityFile = [string]$legacyConfig.Vast.Ssh.IdentityFile
-        $config.Secrets = $legacyConfig.Secrets
-        $config.Codex = $legacyConfig.Codex
-        $config.Application.DefaultType = 'comfyui'
-        Save-JsonFile -Path $canonicalRelativePath -Value $config | Out-Null
-    }
-
-    if ((Test-Path -LiteralPath $canonicalPath -PathType Leaf) -and $null -ne $legacyConfig) {
-        $config = Get-DeployConfig -ConfigPath $canonicalPath
-        $legacyStatePath = Resolve-ProjectPath -Path ([string]$legacyConfig.Local.StatePath)
-        $canonicalStatePath = Resolve-ProjectPath -Path ([string]$config.Local.StatePath)
-        if ($legacyStatePath -ne $canonicalStatePath -and
-            (Test-Path -LiteralPath $legacyStatePath -PathType Leaf) -and
-            -not (Test-Path -LiteralPath $canonicalStatePath -PathType Leaf)) {
-            $legacyState = Get-Content -LiteralPath $legacyStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($legacyState.PSObject.Properties.Name -notcontains 'application_type') {
-                $legacyState | Add-Member -NotePropertyName application_type -NotePropertyValue 'comfyui'
-            }
-            if ($legacyState.PSObject.Properties.Name -notcontains 'deployment_image') {
-                $legacyState | Add-Member -NotePropertyName deployment_image -NotePropertyValue ([string]$legacyConfig.Vast.Instance.Image)
-            }
-            if ($legacyState.PSObject.Properties.Name -contains 'schema_version') {
-                $legacyState.schema_version = 2
-            } else {
-                $legacyState | Add-Member -NotePropertyName schema_version -NotePropertyValue 2
-            }
-            Save-JsonFile -Path ([string]$config.Local.StatePath) -Value $legacyState | Out-Null
-            Write-Host "已保留现有实例/卷状态：$canonicalStatePath" -ForegroundColor Yellow
-        }
-    }
-
-    if (Test-Path -LiteralPath $canonicalPath -PathType Leaf) {
-        Save-JsonFile -Path 'user-config/launcher.json' -Value ([ordered]@{
-            deployment = 'pytorch-ui'
-            config_path = $canonicalRelativePath
-            selected_at = (Get-Date).ToUniversalTime().ToString('o')
-        }) | Out-Null
-        return Get-LauncherSelection
-    }
-    return $null
 }
 
 function Get-LocalDeploymentSummary {
@@ -113,19 +42,19 @@ function Get-LocalDeploymentSummary {
         return [pscustomobject]@{ Exists = $false; HasActiveResources = $false; CanResumeInstance = $false; CanContinueDeployment = $false; InstanceStatus = '未部署'; VolumeStatus = '无'; State = $null }
     }
     try {
-        $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $state = Get-DeploymentState -Config $Config
         $hasActiveResources = Test-DeploymentStateHasActiveResources -State $state
         $canResumeInstance = Test-DeploymentStateCanResumeInstance -State $state
         $canContinueDeployment = Test-DeploymentStateCanContinueDeployment -State $state
         $instanceStatus = if ($state.instance_id) {
-            if ($state.instance_status) { [string]$state.instance_status } else { 'unknown' }
+            [string]$state.instance_status
         } elseif ([string]$state.instance_status -in @('pending', 'create_failed', 'failed')) {
             '未创建（可重试）'
         } else {
             '无'
         }
         $volumeStatus = if ($state.volume_id) {
-            if ($state.volume_status) { [string]$state.volume_status } else { 'created' }
+            [string]$state.volume_status
         } elseif ([string]$state.volume_status -eq 'disabled') {
             '未启用'
         } elseif ([string]$state.volume_status -in @('pending', 'create_failed', 'failed')) {
@@ -147,13 +76,13 @@ function Get-LocalDeploymentSummary {
     }
 }
 
-function Show-LauncherMenu {
-    param($Selection, [hashtable]$Config, $Summary)
+function Show-MainMenu {
+    param([hashtable]$Config, $Summary)
 
     Write-Host ''
     Write-Host ('=' * 68) -ForegroundColor DarkCyan
     $application = Get-DeploymentApplication -Config $Config -State $Summary.State
-    $displayImage = [string](Get-ObjectProperty -Object $Summary.State -Names @('deployment_image') -Default $Config.Vast.Instance.Image)
+    $displayImage = if ($null -eq $Summary.State) { [string]$Config.Vast.Instance.Image } else { [string]$Summary.State.deployment_image }
     Write-Host ' Anima · Vast.ai PyTorch 自动部署' -ForegroundColor Cyan
     Write-Host ('=' * 68) -ForegroundColor DarkCyan
     Write-Host "远端应用：$($application.DisplayName)"
@@ -186,17 +115,16 @@ function Show-LauncherMenu {
     }
 }
 
-function Invoke-LauncherOperation {
-    param([string]$Name, $Selection, [hashtable]$Config)
+function Invoke-MainOperation {
+    param([string]$Name, [hashtable]$Config)
 
-    $configPath = Resolve-ProjectPath -Path ([string]$Selection.config_path)
     $summary = Get-LocalDeploymentSummary -Config $Config
     switch ($Name) {
         'Deploy' {
             if ($summary.Exists -and $summary.HasActiveResources -and
                 -not $summary.CanResumeInstance -and
                 -not $summary.CanContinueDeployment) {
-                throw "当前配置仍跟踪远端实例或持久卷。请先查看状态并处理已有资源，避免重复计费。"
+                throw '当前配置仍跟踪远端实例或持久卷。请先查看状态并处理已有资源，避免重复计费。'
             }
             & (Join-Path $scriptsRoot 'Test-Configuration.ps1') -ConfigPath $configPath
             Write-Host ''
@@ -233,7 +161,7 @@ function Invoke-LauncherOperation {
             & (Join-Path $scriptsRoot 'Stop-VastInstance.ps1') -ConfigPath $configPath
         }
         'Configure' {
-            & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') -Force | Out-Host
+            & (Join-Path $scriptsRoot 'Initialize-DeploymentConfig.ps1') -Force | Out-Host
         }
         'Test' {
             & (Join-Path $scriptsRoot 'Test-Configuration.ps1') -ConfigPath $configPath
@@ -241,7 +169,7 @@ function Invoke-LauncherOperation {
         'Destroy' {
             if (-not $summary.Exists -or -not $summary.State.instance_id -or $summary.State.instance_status -eq 'destroyed') { throw '没有可销毁的活动实例。' }
             $instanceId = $summary.State.instance_id
-            if (-not (Read-LauncherYesNo -Prompt "确认永久销毁实例 $instanceId 吗？")) {
+            if (-not (Read-Confirmation -Prompt "确认永久销毁实例 $instanceId 吗？")) {
                 Write-Host '销毁已取消。'; return
             }
             & (Join-Path $scriptsRoot 'Destroy-VastInstance.ps1') -ConfigPath $configPath -Force
@@ -251,7 +179,7 @@ function Invoke-LauncherOperation {
                 throw '没有可删除的持久卷。'
             }
             $volumeId = $summary.State.volume_id
-            if (-not (Read-LauncherYesNo -Prompt "确认永久删除持久卷 $volumeId 及其中模型和输出吗？")) {
+            if (-not (Read-Confirmation -Prompt "确认永久删除持久卷 $volumeId 及其中模型和输出吗？")) {
                 Write-Host '删除已取消。'; return
             }
             & (Join-Path $scriptsRoot 'Remove-VastVolume.ps1') -ConfigPath $configPath -Force
@@ -260,42 +188,37 @@ function Invoke-LauncherOperation {
     }
 }
 
-$selection = Initialize-SingleDeploymentConfiguration
-$firstRun = ($null -eq $selection)
-$environmentConfig = if ($firstRun) { Join-Path $projectRoot 'config.psd1' } else { Resolve-ProjectPath -Path ([string]$selection.config_path) }
+$firstRun = -not (Test-Path -LiteralPath $configPath -PathType Leaf)
+$environmentConfig = if ($firstRun) { Join-Path $projectRoot 'config.psd1' } else { $configPath }
 $environmentStatus = & (Join-Path $scriptsRoot 'Initialize-Environment.ps1') -ConfigPath $environmentConfig -PassThru
-if (-not $firstRun) {
-    Update-LauncherSshIdentity -Selection $selection -PrivateKeyPath $environmentStatus.SshPrivateKey
-}
 
 if ($firstRun) {
     Write-Host ''
     Write-Host '这是首次运行。接下来通过终端向导初始化搜索和部署参数。' -ForegroundColor Cyan
-    & (Join-Path $scriptsRoot 'Initialize-SearchProfile.ps1') | Out-Host
-    $selection = Get-LauncherSelection
-    Update-LauncherSshIdentity -Selection $selection -PrivateKeyPath $environmentStatus.SshPrivateKey
+    & (Join-Path $scriptsRoot 'Initialize-DeploymentConfig.ps1') | Out-Host
+    Update-DeploymentSshIdentity -PrivateKeyPath $environmentStatus.SshPrivateKey
     if ($Action -eq 'Configure') { $Action = 'Menu' }
-    if ($Action -eq 'Menu' -and (Read-LauncherYesNo -Prompt '初始化已完成，现在搜索报价并开始部署吗？')) {
+    if ($Action -eq 'Menu' -and (Read-Confirmation -Prompt '初始化已完成，现在搜索报价并开始部署吗？')) {
         $Action = 'Deploy'
     }
+} else {
+    Update-DeploymentSshIdentity -PrivateKeyPath $environmentStatus.SshPrivateKey
 }
 
 if ($Action -ne 'Menu') {
-    $selection = Get-LauncherSelection
-    $config = Get-DeployConfig -ConfigPath ([string]$selection.config_path)
-    Invoke-LauncherOperation -Name $Action -Selection $selection -Config $config
+    $config = Get-DeployConfig -ConfigPath $configPath
+    Invoke-MainOperation -Name $Action -Config $config
     exit 0
 }
 
 while ($true) {
-    $selection = Get-LauncherSelection
-    Update-LauncherSshIdentity -Selection $selection -PrivateKeyPath $environmentStatus.SshPrivateKey
-    $config = Get-DeployConfig -ConfigPath ([string]$selection.config_path)
+    Update-DeploymentSshIdentity -PrivateKeyPath $environmentStatus.SshPrivateKey
+    $config = Get-DeployConfig -ConfigPath $configPath
     $summary = Get-LocalDeploymentSummary -Config $config
-    $selectedAction = Show-LauncherMenu -Selection $selection -Config $config -Summary $summary
+    $selectedAction = Show-MainMenu -Config $config -Summary $summary
     if ($selectedAction -eq 'Exit') { break }
     try {
-        Invoke-LauncherOperation -Name $selectedAction -Selection $selection -Config $config
+        Invoke-MainOperation -Name $selectedAction -Config $config
     } catch {
         Write-Host ''
         Write-Host ("操作失败：{0}" -f $_.Exception.Message) -ForegroundColor Red

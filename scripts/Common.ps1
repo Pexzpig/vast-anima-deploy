@@ -63,11 +63,11 @@ function ConvertTo-HashtableDeep {
 }
 
 function Get-DeployConfig {
-    param([string]$ConfigPath = (Join-Path $script:ProjectRoot 'config.psd1'))
+    param([string]$ConfigPath = (Join-Path $script:ProjectRoot 'user-config\deployment.json'))
 
     $resolvedPath = Resolve-ProjectPath -Path $ConfigPath
     if (-not (Test-Path -LiteralPath $resolvedPath)) {
-        throw "Configuration not found: $resolvedPath. Restore or create config.psd1 before continuing."
+        throw "Configuration not found: $resolvedPath. Run Start-VastAnima.ps1 to initialize it."
     }
 
     if ([System.IO.Path]::GetExtension($resolvedPath) -ieq '.json') {
@@ -76,6 +76,26 @@ function Get-DeployConfig {
     }
 
     return Import-PowerShellDataFile -LiteralPath $resolvedPath
+}
+
+function Set-DeploymentSearchPreferences {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [Parameter(Mandatory = $true)][string]$Query,
+        [Parameter(Mandatory = $true)][int]$SearchLimit,
+        [Parameter(Mandatory = $true)][double]$MaxHourlyUsd,
+        [Parameter(Mandatory = $true)][bool]$VolumeEnabled,
+        [Parameter(Mandatory = $true)][int]$VolumeSizeGb,
+        [Parameter(Mandatory = $true)][ValidateSet('comfyui', 'webui')][string]$ApplicationType
+    )
+
+    $Config.Vast.Search.Query = $Query
+    $Config.Vast.Search.Limit = $SearchLimit
+    $Config.Vast.Search.MaxHourlyUsd = $MaxHourlyUsd
+    $Config.Vast.Volume.Enabled = $VolumeEnabled
+    $Config.Vast.Volume.SizeGb = $VolumeSizeGb
+    $Config.Application.DefaultType = $ApplicationType
+    return $Config
 }
 
 function Assert-CommandExists {
@@ -239,16 +259,34 @@ function Invoke-NativeCommandCheckedWithRetry {
         [Parameter(Mandatory = $true)][string]$FailureMessage,
         [ValidateRange(1, 20)][int]$Attempts = 4,
         [ValidateRange(0, 300)][int]$DelaySeconds = 5,
-        [ValidateRange(0, 3600)][int]$TimeoutSeconds = 0
+        [ValidateRange(0, 3600)][int]$TimeoutSeconds = 0,
+        [switch]$Quiet
     )
 
     $lastResult = $null
+    $lastTimeoutMessage = $null
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-        $lastResult = Invoke-NativeCommandCapture `
-            -Command $Command `
-            -Arguments $Arguments `
-            -TimeoutSeconds $TimeoutSeconds
-        $lastResult.Output | ForEach-Object { Write-Host $_ }
+        try {
+            $lastResult = Invoke-NativeCommandCapture `
+                -Command $Command `
+                -Arguments $Arguments `
+                -TimeoutSeconds $TimeoutSeconds
+            $lastTimeoutMessage = $null
+        }
+        catch {
+            if ($_.Exception.Message -notmatch '\[NATIVE_COMMAND_TIMEOUT\]') { throw }
+            $lastResult = $null
+            $lastTimeoutMessage = $_.Exception.Message
+            if ($attempt -lt $Attempts) {
+                Write-Warning "$Command timed out (attempt $attempt/$Attempts). Retrying in $DelaySeconds seconds..."
+                if ($DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
+                continue
+            }
+            break
+        }
+        if (-not $Quiet) {
+            $lastResult.Output | ForEach-Object { Write-Host $_ }
+        }
         if ($lastResult.ExitCode -eq 0) { return }
 
         if ($attempt -lt $Attempts) {
@@ -257,7 +295,31 @@ function Invoke-NativeCommandCheckedWithRetry {
         }
     }
 
+    if ($lastTimeoutMessage) {
+        throw "$FailureMessage Native command timed out after $Attempts attempts.`n$lastTimeoutMessage"
+    }
     throw "$FailureMessage Native command failed after $Attempts attempts with exit code $($lastResult.ExitCode).`n$($lastResult.Text)"
+}
+
+function Write-TransientStatus {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [switch]$Complete,
+        [ConsoleColor]$ForegroundColor = [ConsoleColor]::DarkCyan
+    )
+
+    $outputRedirected = $true
+    try { $outputRedirected = [Console]::IsOutputRedirected } catch {}
+    if ($outputRedirected) {
+        if ($Complete) { Write-Host $Message -ForegroundColor $ForegroundColor }
+        return
+    }
+
+    $width = 120
+    try { $width = [Math]::Max(40, [Console]::BufferWidth - 1) } catch {}
+    $display = if ($Message.Length -ge $width) { $Message.Substring(0, $width - 1) } else { $Message }
+    Write-Host ("`r{0,-$width}" -f $display) -NoNewline -ForegroundColor $ForegroundColor
+    if ($Complete) { Write-Host '' }
 }
 
 function Get-VastAuthenticationStatus {
@@ -456,12 +518,15 @@ function Get-DeploymentApplication {
         $State
     )
 
-    $configuredDefault = if ($Config.ContainsKey('Application') -and $Config.Application.ContainsKey('DefaultType')) {
+    $type = if ($null -eq $State) {
         [string]$Config.Application.DefaultType
     } else {
-        'comfyui'
+        if (-not (Test-ObjectProperty -Object $State -Name 'application_type') -or
+            [string]::IsNullOrWhiteSpace([string]$State.application_type)) {
+            throw 'Deployment state is missing required field: application_type.'
+        }
+        [string]$State.application_type
     }
-    $type = [string](Get-ObjectProperty -Object $State -Names @('application_type') -Default $configuredDefault)
     $type = $type.Trim().ToLowerInvariant()
 
     switch ($type) {
@@ -478,7 +543,6 @@ function Get-DeploymentApplication {
             }
         }
         'webui' {
-            if (-not $Config.ContainsKey('WebUI')) { throw 'WebUI configuration is missing.' }
             $settings = $Config.WebUI
             return [pscustomobject]@{
                 Type = 'webui'
@@ -492,6 +556,53 @@ function Get-DeploymentApplication {
         }
         default { throw "Unsupported deployment application type: $type" }
     }
+}
+
+function Test-ObjectProperty {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($Object -is [System.Collections.IDictionary]) {
+        return $Object.Contains($Name)
+    }
+    return $Object.PSObject.Properties.Name -contains $Name
+}
+
+function Assert-DeploymentState {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $requiredFields = @(
+        'schema_version', 'created_at', 'updated_at', 'search_query',
+        'offer_id', 'machine_id', 'gpu_name', 'hourly_usd',
+        'volume_monthly_usd', 'estimated_total_hourly_usd',
+        'volume_id', 'volume_label', 'volume_status', 'storage_mode',
+        'application_type', 'deployment_image', 'instance_id', 'instance_status',
+        'provisioned', 'provisioned_at', 'ssh_host', 'ssh_port', 'last_error',
+        'destroyed_at', 'volume_deleted_at'
+    )
+    $missingFields = @($requiredFields | Where-Object { -not (Test-ObjectProperty -Object $State -Name $_) })
+    if ($missingFields.Count -gt 0) {
+        throw "Deployment state is incompatible with the current schema; missing required field(s): $($missingFields -join ', ')."
+    }
+    if ([int]$State.schema_version -ne 2) {
+        throw "Unsupported deployment state schema_version '$($State.schema_version)'; expected 2."
+    }
+    if ([string]$State.application_type -notin @('comfyui', 'webui')) {
+        throw "Unsupported deployment state application_type '$($State.application_type)'."
+    }
+    if ([string]$State.storage_mode -notin @('volume', 'instance_disk')) {
+        throw "Unsupported deployment state storage_mode '$($State.storage_mode)'."
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$State.deployment_image)) {
+        throw 'Deployment state deployment_image must not be empty.'
+    }
+    if ([string]$State.storage_mode -eq 'instance_disk' -and
+        ($null -ne $State.volume_id -or [string]$State.volume_status -ne 'disabled')) {
+        throw 'Instance-disk deployment state must not track a persistent volume.'
+    }
+    return $State
 }
 
 function Find-VastInstanceInResponse {
@@ -608,13 +719,13 @@ function ConvertTo-VastOfferChoiceRows {
         $reliability = [double](Get-ObjectProperty -Object $offer -Names @('reliability2', 'reliability') -Default 0)
         $rows += [pscustomobject]@{
             choice = $index + 1
-            offer_id = Get-ObjectProperty -Object $offer -Names @('id')
             gpu_name = [string](Get-ObjectProperty -Object $offer -Names @('gpu_name') -Default 'unknown')
             gpu_ram_GB = [math]::Round($gpuRamMb / 1024, 1)
             price_USD_hour = Format-UsdPrice -Amount ([double](Get-ObjectProperty -Object $offer -Names @('dph_total', 'dph') -Default 0))
             reliability = $reliability.ToString('0.0000', [Globalization.CultureInfo]::InvariantCulture)
             inet_down_Mbps = [math]::Round([double](Get-ObjectProperty -Object $offer -Names @('inet_down') -Default 0), 1)
-            machine_id = Get-ObjectProperty -Object $offer -Names @('machine_id')
+            ip = [string](Get-ObjectProperty -Object $offer -Names @('public_ipaddr', 'public_ip', 'ssh_host') -Default 'unknown')
+            region = [string](Get-ObjectProperty -Object $offer -Names @('geolocation', 'location') -Default 'unknown')
         }
     }
     return $rows
@@ -631,7 +742,9 @@ function Save-JsonFile {
     if (-not (Test-Path -LiteralPath $directory)) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
-    $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $resolved -Encoding UTF8
+    $json = $Value | ConvertTo-Json -Depth 20
+    $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($resolved, $json + [Environment]::NewLine, $utf8WithoutBom)
     return $resolved
 }
 
@@ -642,7 +755,13 @@ function Get-DeploymentState {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Deployment state not found: $path. Run New-VastDeployment.ps1 first."
     }
-    return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    try {
+        $state = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        throw "Deployment state is not valid JSON: $path. $($_.Exception.Message)"
+    }
+    return Assert-DeploymentState -State $state
 }
 
 function Save-DeploymentState {
@@ -652,6 +771,7 @@ function Save-DeploymentState {
     )
 
     $State.updated_at = (Get-Date).ToUniversalTime().ToString('o')
+    Assert-DeploymentState -State $State | Out-Null
     return Save-JsonFile -Value $State -Path ([string]$Config.Local.StatePath)
 }
 
@@ -729,16 +849,22 @@ function Wait-VastInstanceRunning {
         $statusDetails = "actual=$status, intended=$intendedStatus, current=$currentState, next=$nextState"
         if ($statusMessage) { $statusDetails += ", message=$statusMessage" }
 
-        Write-Host "Instance $InstanceId status: $statusDetails"
-        if ($status -eq 'running') { return $item }
+        if ($status -eq 'running') {
+            Write-TransientStatus -Message "Instance $InstanceId is running." -Complete -ForegroundColor Green
+            return $item
+        }
+        $elapsedSeconds = [Math]::Max(0, [int]($timeout - ($deadline - (Get-Date)).TotalSeconds))
+        Write-TransientStatus -Message "Waiting for instance $InstanceId ($status, ${elapsedSeconds}s elapsed)..."
 
         if ($immediateFatalStates -contains $status) {
+            Write-TransientStatus -Message "Instance $InstanceId failed to start." -Complete -ForegroundColor Red
             throw "Instance $InstanceId failed to start ($statusDetails). Run 'vastai logs $InstanceId --tail 200' for container logs."
         }
         if ($retryableTerminalStates -contains $status) {
             if ($null -eq $terminalStateSince) { $terminalStateSince = Get-Date }
             $terminalSeconds = ((Get-Date) - $terminalStateSince).TotalSeconds
             if ($terminalSeconds -ge $TerminalStateGraceSeconds) {
+                Write-TransientStatus -Message "Instance $InstanceId remained in '$status'." -Complete -ForegroundColor Red
                 throw "Instance $InstanceId did not leave '$status' within $TerminalStateGraceSeconds seconds ($statusDetails). Run 'vastai logs $InstanceId --tail 200' for container logs."
             }
         } else {
@@ -746,6 +872,7 @@ function Wait-VastInstanceRunning {
         }
         Start-Sleep -Seconds $poll
     }
+    Write-TransientStatus -Message "Timed out waiting for instance $InstanceId." -Complete -ForegroundColor Red
     throw "Timed out after $timeout seconds waiting for instance $InstanceId to run. Use 'vastai show instance $InstanceId --raw' and 'vastai logs $InstanceId --tail 200' for details."
 }
 
@@ -853,28 +980,31 @@ function Wait-VastSshReady {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $attempt = 0
     $lastResult = $null
-    $sshCommon = @(Get-SshCommonArguments -Config $Config)
+    $sshCommon = @(Get-SshCommonArguments -Config $Config) + @('-o', 'LogLevel=QUIET')
     $target = "$($Endpoint.User)@$($Endpoint.Host)"
+    $startedAt = Get-Date
 
     while ((Get-Date) -lt $deadline) {
         $attempt++
         $lastResult = Invoke-NativeCommandCapture -Command 'ssh' -Arguments ($sshCommon + @(
+            '-T', '-n',
             '-o', 'ConnectionAttempts=1',
             '-p', [string]$Endpoint.Port,
             $target,
             "printf 'SSH_READY\\n'"
         ))
         if ($lastResult.ExitCode -eq 0 -and $lastResult.Text -match 'SSH_READY') {
-            Write-Host "SSH is ready at ${target}:$($Endpoint.Port) (attempt $attempt)." -ForegroundColor Green
+            Write-TransientStatus -Message "SSH is ready at ${target}:$($Endpoint.Port) (attempt $attempt)." -Complete -ForegroundColor Green
             return
         }
 
-        $detail = if ($lastResult.Text) { ($lastResult.Text -split "`r?`n")[-1] } else { "exit $($lastResult.ExitCode)" }
-        Write-Host "SSH is not ready yet (attempt $attempt): $detail" -ForegroundColor DarkYellow
+        $elapsedSeconds = [int]((Get-Date) - $startedAt).TotalSeconds
+        Write-TransientStatus -Message "Waiting for SSH at ${target}:$($Endpoint.Port) (attempt $attempt, ${elapsedSeconds}s elapsed)..." -ForegroundColor DarkYellow
         Start-Sleep -Seconds $PollIntervalSeconds
     }
 
     $lastText = if ($null -ne $lastResult) { $lastResult.Text } else { 'No SSH attempt completed.' }
+    Write-TransientStatus -Message "Timed out waiting for SSH at ${target}:$($Endpoint.Port)." -Complete -ForegroundColor Red
     throw "Timed out after $TimeoutSeconds seconds waiting for SSH at ${target}:$($Endpoint.Port).`n$lastText"
 }
 

@@ -11,7 +11,7 @@ param(
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
-if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'config.psd1' }
+if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 $volumeConfig = $config.Vast.Volume
 $resumeState = $null
@@ -20,7 +20,7 @@ $selectedApplicationType = $null
 
 $existingStatePath = Resolve-ProjectPath -Path ([string]$config.Local.StatePath)
 if (Test-Path -LiteralPath $existingStatePath) {
-    $existingState = Get-Content -LiteralPath $existingStatePath -Raw | ConvertFrom-Json
+    $existingState = Get-DeploymentState -Config $config
     if (Test-DeploymentStateHasActiveResources -State $existingState) {
         if (Test-DeploymentStateCanResumeInstance -State $existingState) {
             $resumeState = $existingState
@@ -34,7 +34,7 @@ if (Test-Path -LiteralPath $existingStatePath) {
 }
 
 if ($null -ne $resumeState) {
-    $selectedApplicationType = [string](Get-ObjectProperty -Object $resumeState -Names @('application_type') -Default $config.Application.DefaultType)
+    $selectedApplicationType = [string]$resumeState.application_type
     if ($ApplicationType -ne 'Prompt' -and $ApplicationType.ToLowerInvariant() -ne $selectedApplicationType.ToLowerInvariant()) {
         throw "Deployment is resuming existing resources configured for '$selectedApplicationType'; the application type cannot be changed until those resources are removed."
     }
@@ -202,6 +202,8 @@ $offerId = [int64](Get-ObjectProperty -Object $selectedOffer -Names @('id'))
 $hourlyPrice = [double](Get-ObjectProperty -Object $selectedOffer -Names @('dph_total', 'dph') -Default 0)
 $gpuName = [string](Get-ObjectProperty -Object $selectedOffer -Names @('gpu_name') -Default 'unknown')
 $machineId = [int64](Get-ObjectProperty -Object $selectedOffer -Names @('machine_id') -Default 0)
+$publicIp = [string](Get-ObjectProperty -Object $selectedOffer -Names @('public_ipaddr', 'public_ip', 'ssh_host') -Default 'unknown')
+$region = [string](Get-ObjectProperty -Object $selectedOffer -Names @('geolocation', 'location') -Default 'unknown')
 
 $instanceHourlyText = Format-UsdPrice -Amount $hourlyPrice
 $volumeMonthlyUsd = 0.0
@@ -211,7 +213,7 @@ $estimatedTotalHourlyUsd = $hourlyPrice
 Write-Host ''
 Write-Host 'Vast.ai deployment price' -ForegroundColor Yellow
 Write-Host "  Application: $($selectedApplication.DisplayName)"
-Write-Host "  GPU offer: $offerId | $gpuName | machine $machineId"
+Write-Host "  GPU: $gpuName | IP $publicIp | $region"
 Write-Host "  Instance: $instanceHourlyText USD/hour"
 if ($null -ne $resumeState) {
     $volumeMonthlyUsd = [double](Get-ObjectProperty -Object $resumeState -Names @('volume_monthly_usd') -Default 0)
@@ -249,21 +251,9 @@ if ($null -ne $resumeState) {
     $state.hourly_usd = $hourlyPrice
     $state.volume_monthly_usd = $volumeMonthlyUsd
     $state.estimated_total_hourly_usd = $estimatedTotalHourlyUsd
-    if ($state.PSObject.Properties.Name -contains 'storage_mode') {
-        $state.storage_mode = 'volume'
-    } else {
-        $state | Add-Member -NotePropertyName storage_mode -NotePropertyValue 'volume'
-    }
-    if ($state.PSObject.Properties.Name -contains 'application_type') {
-        $state.application_type = $selectedApplicationType
-    } else {
-        $state | Add-Member -NotePropertyName application_type -NotePropertyValue $selectedApplicationType
-    }
-    if ($state.PSObject.Properties.Name -contains 'deployment_image') {
-        $state.deployment_image = [string]$config.Vast.Instance.Image
-    } else {
-        $state | Add-Member -NotePropertyName deployment_image -NotePropertyValue ([string]$config.Vast.Instance.Image)
-    }
+    $state.storage_mode = 'volume'
+    $state.application_type = $selectedApplicationType
+    $state.deployment_image = [string]$config.Vast.Instance.Image
     $state.instance_status = 'pending'
     $state.provisioned = $false
     $state.provisioned_at = $null
@@ -325,13 +315,7 @@ $createArguments = @(
     '--label', [string]$config.Vast.Instance.Label,
     '--ssh', '--direct', '--cancel-unavail'
 )
-$onStartCommand = if ($config.Vast.Instance.ContainsKey('OnStartCommand')) {
-    [string]$config.Vast.Instance.OnStartCommand
-} elseif ([string]$config.Vast.Instance.Image -match '^vastai/pytorch:') {
-    '/opt/instance-tools/bin/entrypoint.sh'
-} else {
-    ''
-}
+$onStartCommand = [string]$config.Vast.Instance.OnStartCommand
 if ($onStartCommand) {
     # Vast SSH launch mode replaces the image ENTRYPOINT. Running the original
     # Vast image entrypoint from onstart brings up Supervisor and app services.
@@ -369,7 +353,5 @@ $state.ssh_host = $endpoint.Host
 $state.ssh_port = $endpoint.Port
 Save-DeploymentState -Config $config -State $state | Out-Null
 
-Write-Host 'Vast reports the container as running; waiting for the injected SSH service to become stable...' -ForegroundColor Cyan
 Wait-VastSshReady -Config $config -Endpoint $endpoint
-Write-Host "Instance and SSH are ready: ssh $($endpoint.User)@$($endpoint.Host) -p $($endpoint.Port)" -ForegroundColor Green
 Write-Host "Next: .\scripts\Provision-Instance.ps1"

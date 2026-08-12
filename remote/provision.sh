@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail
 
 if [[ $# -ne 1 || ! -f "$1" ]]; then
   echo "Usage: $0 /path/to/remote-config.json" >&2

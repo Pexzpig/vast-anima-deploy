@@ -10,13 +10,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not $ConfigPath) { $ConfigPath = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..')).Path 'config.psd1' }
+if (-not $ConfigPath) { $ConfigPath = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..')).Path 'user-config\deployment.json' }
 . (Join-Path $PSScriptRoot 'Common.ps1')
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 $statePath = Resolve-ProjectPath -Path ([string]$config.Local.StatePath)
 
 if (Test-Path -LiteralPath $statePath -PathType Leaf) {
-    $existingState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $existingState = Get-DeploymentState -Config $config
     if (Test-DeploymentStateCanContinueDeployment -State $existingState) {
         Write-Host "Continuing deployment for existing instance $($existingState.instance_id); no paid resource will be created again." -ForegroundColor Yellow
         if ([string]$existingState.instance_status -eq 'stopped') {

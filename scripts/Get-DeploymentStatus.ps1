@@ -2,7 +2,7 @@
 param([string]$ConfigPath)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
-if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'config.psd1' }
+if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 $state = Get-DeploymentState -Config $config
 $application = Get-DeploymentApplication -Config $config -State $state

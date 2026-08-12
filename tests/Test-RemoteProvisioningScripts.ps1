@@ -36,7 +36,10 @@ foreach ($expected in @('Base PyTorch environment', 'Forge Classic WebUI', 'Comf
 if (-not $localProvision.Contains('Uploading the remote verification script failed.') -or
     -not $localProvision.Contains('[local 4/5]') -or
     -not $localProvision.Contains('Wait-VastSshReady') -or
-    -not $localProvision.Contains('Invoke-NativeCommandCheckedWithRetry')) {
+    -not $localProvision.Contains('Invoke-NativeCommandCheckedWithRetry') -or
+    -not $localProvision.Contains("'LogLevel=QUIET'") -or
+    -not $localProvision.Contains("'-T', '-n'") -or
+    -not $localProvision.Contains('-Quiet')) {
     throw 'Local provisioning does not upload verification or display staged progress.'
 }
 if (-not $remoteCli.Contains('tmux new-session -A -s anima') -or
