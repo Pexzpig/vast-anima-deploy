@@ -69,6 +69,13 @@ function ConvertTo-ShellDisplayArgument {
     return $Value
 }
 
+function Get-RemoteInteractiveCommand {
+    # The vastai/comfy login profile tries to attach an existing tmux session
+    # and exits with "no sessions" on a new persistent volume. Create the
+    # session when necessary and fall back to a normal login shell.
+    return "if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s anima; else exec /bin/bash -l; fi"
+}
+
 function Show-DeploymentConnectionSummary {
     param(
         [Parameter(Mandatory = $true)]$Selection,
@@ -112,9 +119,11 @@ function Show-DeploymentConnectionSummary {
     }
 
     if ($null -ne $Endpoint) {
+        $remoteInteractiveCommand = Get-RemoteInteractiveCommand
         $sshArguments = @(Get-SshCommonArguments -Config $Config) + @(
-            '-p', [string]$Endpoint.Port,
-            "$($Endpoint.User)@$($Endpoint.Host)"
+            '-tt', '-p', [string]$Endpoint.Port,
+            "$($Endpoint.User)@$($Endpoint.Host)",
+            $remoteInteractiveCommand
         )
         $sshCommand = 'ssh ' + (($sshArguments | ForEach-Object {
             ConvertTo-ShellDisplayArgument -Value ([string]$_)
@@ -122,6 +131,7 @@ function Show-DeploymentConnectionSummary {
         Write-Host ("SSH endpoint            : {0}@{1}:{2}" -f $Endpoint.User, $Endpoint.Host, $Endpoint.Port) -ForegroundColor Green
         Write-Host ("SSH command             : {0}" -f $sshCommand) -ForegroundColor Green
         Write-Host ("Remote checks           : supervisorctl status comfyui; ss -lntp | grep {0}" -f $remoteComfyPort)
+        Write-Host 'Remote workspace        : cd /workspace'
         Write-Host 'Codex login             : /workspace/bin/codex-login.sh'
         Write-Host 'Codex CLI               : /workspace/bin/run-codex.sh'
     }
@@ -163,6 +173,18 @@ if ($liveStatus -ne 'running') {
 $endpoint = Get-VastSshEndpoint -Config $config -InstanceId ([int64]$state.instance_id)
 Show-DeploymentConnectionSummary -Selection $selection -Config $config -State $state -LiveStatus $liveStatus -Endpoint $endpoint
 
+Write-Host ''
+Write-Host 'Remote ComfyUI / Codex verification:' -ForegroundColor Cyan
+try {
+    $verification = Invoke-RemoteDeploymentVerification -Config $config -Endpoint $endpoint
+    if ($verification.ExitCode -ne 0) {
+        Write-Warning "Remote deployment verification did not pass (exit $($verification.ExitCode))."
+    }
+}
+catch {
+    Write-Warning "Could not run remote deployment verification: $($_.Exception.Message)"
+}
+
 if ($ShowOnly) {
     exit 0
 }
@@ -170,8 +192,9 @@ if ($ShowOnly) {
 Write-Host ''
 Write-Host 'Opening the interactive remote shell. Type exit to return to Windows.' -ForegroundColor Cyan
 $sshArguments = @(Get-SshCommonArguments -Config $config) + @(
-    '-p', [string]$endpoint.Port,
-    "$($endpoint.User)@$($endpoint.Host)"
+    '-tt', '-p', [string]$endpoint.Port,
+    "$($endpoint.User)@$($endpoint.Host)",
+    (Get-RemoteInteractiveCommand)
 )
 & ssh @sshArguments
 if ($LASTEXITCODE -ne 0) {

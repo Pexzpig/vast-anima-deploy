@@ -110,7 +110,7 @@ ComfyUI 端口和 Codex 参数：
 | 项目 | `vast-comfy`（默认推荐） | `base-image` |
 |---|---|---|
 | 镜像 | `vastai/comfy:v0.28.0-cuda-12.9-py312` | `vastai/base-image:cuda-12.8.1-cudnn-devel-ubuntu22.04-py310` |
-| ComfyUI | 镜像预装，校验为 `v0.28.0` | provision 时克隆和安装 |
+| ComfyUI | 镜像预装运行环境；持久卷为空时检出并校验 `v0.28.0` 源码 | provision 时克隆和安装 |
 | 状态目录 | `profiles/vast-comfy/state/` | `state/` |
 | 实例标签 | `anima-comfyui-preinstalled` | `anima-comfyui-example` |
 | 卷前缀 | `anima_comfy_preinstalled` | `anima_comfyui` |
@@ -119,7 +119,7 @@ ComfyUI 端口和 Codex 参数：
 
 两套配置的 state、实例标签、卷标签、远端 provision 路径和本地端口互相独立，可以各自部署和管理。菜单中的“切换部署配置”只切换当前操作对象，不会停止、销毁或迁移另一套配置的资源；目标配置已有用户 JSON 时直接切换并保留原参数，尚未初始化时才打开一次参数向导。
 
-预装版本会验证镜像中的 ComfyUI checkout 和 CUDA PyTorch，不会重新安装 ComfyUI、PyTorch、基础 requirements 或覆盖镜像自带的 Supervisor 配置。它只配置 Anima 模型、官方 workflow、基线记录和 Codex，然后重启并健康检查服务。
+预装版本复用镜像中的 Python、CUDA、PyTorch 和 Supervisor 配置。当持久卷挂载到 `/workspace` 并遮住镜像原有源码时，脚本会把固定版本的 ComfyUI checkout 检出到持久卷，再配置 Anima 模型、官方 workflow、基线记录和 Codex。已有非空且不是 Git checkout 的目录不会被覆盖。
 
 升级预装镜像时必须同步修改：
 
@@ -141,7 +141,7 @@ ComfyUI.Ref         = <version>
 - Supervisor `comfyui` 服务；
 - Codex CLI 和项目级 `.codex/config.toml`。
 
-模型和 workflow 使用固定 URL；已配置 SHA-256 的文件会校验哈希，其他文件至少要求下载成功且非空。已验证的模型不会重复下载，下载中断后重新选择菜单中的“重新执行配置部署”即可续传。
+模型和 workflow 使用固定 URL；已配置 SHA-256 的文件会校验哈希，其他文件至少要求下载成功且非空。菜单中的“重新执行配置部署”会显示本地上传、源码检出、模型下载大小、校验、服务启动、健康检查和 Codex 配置进度。已验证的模型不会重复下载，下载中断后可从 `.part` 文件续传。部署结束前还会检查 ComfyUI 版本、CUDA、模型、workflow、Supervisor、健康接口及 Codex；菜单中的“查看部署状态”也会在实例运行时重复执行这组远端检查。
 
 相关上游资料：
 

@@ -25,8 +25,10 @@ case "$sandbox_mode" in
 esac
 
 if ! command -v codex >/dev/null 2>&1; then
-  echo "Installing Codex CLI from the configured official installer URL."
+  echo "[codex 1/4] Installing Codex CLI from the configured official installer URL."
   curl --fail --silent --show-error --location "$installer_url" | sh
+else
+  echo "[codex 1/4] Existing Codex CLI found; installation skipped."
 fi
 
 codex_binary=$(command -v codex || true)
@@ -38,6 +40,7 @@ if [[ -z "$codex_binary" ]]; then
   exit 10
 fi
 
+echo "[codex 2/4] Writing project configuration and workspace rules."
 mkdir -p "$project_root/.codex" /workspace/bin
 codex_config="$project_root/.codex/config.toml"
 if [[ -e "$codex_config" ]]; then
@@ -69,6 +72,7 @@ EOF
 fi
 
 login_script=/workspace/bin/codex-login.sh
+echo "[codex 3/4] Creating login and launcher helpers."
 if [[ "$auth_mode" == 'device' ]]; then
   cat > "$login_script" <<EOF
 #!/usr/bin/env bash
@@ -105,6 +109,7 @@ exec $(printf '%q' "$codex_binary") "\$@"
 EOF
 chmod 0755 /workspace/bin/run-codex.sh
 
+echo "[codex 4/4] Verifying the Codex CLI installation."
 echo "Codex CLI: $($codex_binary --version)"
 echo "Project config: $codex_config"
 if [[ "$auth_mode" == 'device' ]]; then

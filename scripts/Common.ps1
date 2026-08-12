@@ -601,3 +601,28 @@ function Get-SshCommonArguments {
     }
     return $arguments
 }
+
+function Invoke-RemoteDeploymentVerification {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [Parameter(Mandatory = $true)]$Endpoint
+    )
+
+    Assert-CommandExists -Name 'ssh'
+    $remoteDirectory = [string]$Config.Local.RemoteUploadDirectory
+    if ($remoteDirectory -notmatch '^/[A-Za-z0-9._/-]+$') {
+        throw "RemoteUploadDirectory cannot be safely passed to the verification shell: $remoteDirectory"
+    }
+
+    $verifyScript = "$remoteDirectory/remote/verify-deployment.sh"
+    $remoteConfig = "$remoteDirectory/remote-config.json"
+    $remoteCommand = "if [ -f '$verifyScript' ] && [ -f '$remoteConfig' ]; then bash '$verifyScript' '$remoteConfig'; else echo 'Remote verification files are not installed. Run menu option 5 first.' >&2; exit 21; fi"
+    $sshCommon = @(Get-SshCommonArguments -Config $Config)
+    $result = Invoke-NativeCommandCapture -Command 'ssh' -Arguments ($sshCommon + @(
+        '-p', [string]$Endpoint.Port,
+        "$($Endpoint.User)@$($Endpoint.Host)",
+        $remoteCommand
+    ))
+    $result.Output | ForEach-Object { Write-Host $_ }
+    return $result
+}

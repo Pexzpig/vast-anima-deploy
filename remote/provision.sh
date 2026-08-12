@@ -177,6 +177,7 @@ fi
 if jq -e '.codex.install == true' "$deploy_config" >/dev/null; then
   bash "$(dirname "$0")/configure-codex.sh" "$deploy_config"
 fi
+bash "$(dirname "$0")/verify-deployment.sh" "$deploy_config"
 
 echo "Provisioning complete."
 echo "ComfyUI is bound to $comfy_host:$comfy_port and should be accessed through the SSH tunnel."

@@ -8,10 +8,12 @@ $state = Get-DeploymentState -Config $config
 
 Assert-CommandExists -Name 'ssh'
 Assert-CommandExists -Name 'scp'
+Write-Host '[local 1/5] Waiting for the Vast.ai instance and resolving its SSH endpoint...' -ForegroundColor Cyan
 Wait-VastInstanceRunning -Config $config -InstanceId $state.instance_id | Out-Null
 $endpoint = Get-VastSshEndpoint -Config $config -InstanceId $state.instance_id
 $sshCommon = @(Get-SshCommonArguments -Config $config)
 
+Write-Host '[local 2/5] Generating the remote deployment configuration...' -ForegroundColor Cyan
 $remoteConfig = [ordered]@{
     schema_version = 1
     comfyui = [ordered]@{
@@ -58,13 +60,15 @@ $codexScriptPath = if ($config.Local.ContainsKey('CodexScriptPath')) {
 } else {
     Join-Path $script:ProjectRoot 'remote/configure-codex.sh'
 }
-foreach ($requiredScript in @($provisionScriptPath, $codexScriptPath)) {
+$verifyScriptPath = Resolve-ProjectPath -Path 'remote/verify-deployment.sh'
+foreach ($requiredScript in @($provisionScriptPath, $codexScriptPath, $verifyScriptPath)) {
     if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
         throw "Remote script not found: $requiredScript"
     }
 }
 
 $target = "$($endpoint.User)@$($endpoint.Host)"
+Write-Host "[local 3/5] Uploading deployment scripts to $target..." -ForegroundColor Cyan
 Invoke-NativeCommandChecked -Command 'ssh' -Arguments ($sshCommon + @(
     '-p', [string]$endpoint.Port, $target, "mkdir -p '$remoteUploadDirectory/remote'"
 )) -FailureMessage 'Could not create remote upload directory.'
@@ -80,18 +84,33 @@ Invoke-NativeCommandChecked -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $codexScriptPath, "${target}:$remoteUploadDirectory/remote/configure-codex.sh"
 )) -FailureMessage 'Uploading the remote Codex script failed.'
 Invoke-NativeCommandChecked -Command 'scp' -Arguments ($scpCommon + @(
+    '-P', [string]$endpoint.Port, $verifyScriptPath, "${target}:$remoteUploadDirectory/remote/verify-deployment.sh"
+)) -FailureMessage 'Uploading the remote verification script failed.'
+Invoke-NativeCommandChecked -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $generatedConfig, "${target}:$remoteUploadDirectory/remote-config.json"
 )) -FailureMessage 'Uploading remote configuration failed.'
 
+Write-Host '[local 4/5] Running remote provisioning; model downloads can take a long time.' -ForegroundColor Cyan
+Write-Host 'Progress and downloaded sizes will be printed below. Interrupted downloads resume from .part files.' -ForegroundColor DarkCyan
 $remoteCommand = "bash '$remoteUploadDirectory/remote/provision.sh' '$remoteUploadDirectory/remote-config.json'"
-Invoke-NativeCommandChecked -Command 'ssh' -Arguments ($sshCommon + @(
-    '-p', [string]$endpoint.Port, $target, $remoteCommand
-)) -FailureMessage 'Remote provisioning failed.'
+try {
+    Invoke-NativeCommandChecked -Command 'ssh' -Arguments ($sshCommon + @(
+        '-p', [string]$endpoint.Port, $target, $remoteCommand
+    )) -FailureMessage 'Remote provisioning failed.'
+}
+catch {
+    $state.provisioned = $false
+    $state.last_error = $_.Exception.Message
+    Save-DeploymentState -Config $config -State $state | Out-Null
+    throw
+}
 
+Write-Host '[local 5/5] Remote verification passed; saving deployment state...' -ForegroundColor Cyan
 $state.provisioned = $true
 $state.provisioned_at = (Get-Date).ToUniversalTime().ToString('o')
 $state.ssh_host = $endpoint.Host
 $state.ssh_port = $endpoint.Port
+$state.last_error = $null
 Save-DeploymentState -Config $config -State $state | Out-Null
 
 Write-Host "Remote provisioning completed for instance $($state.instance_id)." -ForegroundColor Green

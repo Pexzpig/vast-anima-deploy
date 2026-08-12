@@ -12,6 +12,17 @@ if [[ ! -f "$deploy_config" ]]; then
   exit 2
 fi
 
+stage_number=0
+stage_total=9
+current_stage='startup'
+stage() {
+  stage_number=$((stage_number + 1))
+  current_stage=$1
+  printf '\n[%d/%d] %s\n' "$stage_number" "$stage_total" "$current_stage"
+}
+trap 'code=$?; echo "[FAILED] Stage: $current_stage (line $LINENO, exit $code)" >&2' ERR
+
+stage 'Checking required commands and deployment configuration'
 for required_command in jq git curl sha256sum supervisorctl; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     echo "Required command is missing from the vastai/comfy image: $required_command" >&2
@@ -45,16 +56,36 @@ download_file() {
     exit 5
   fi
 
-  echo "Downloading $url"
-  curl --fail --location --retry 6 --retry-delay 5 --continue-at - --output "$partial" "$url"
-  if [[ -n "$expected_sha" ]] && ! echo "$expected_sha  $partial" | sha256sum --check --status; then
-    echo "Checksum verification failed: $partial" >&2
-    exit 5
+  echo "Downloading: $url"
+  echo "Destination: $destination"
+  curl --fail --silent --show-error --location --retry 6 --retry-delay 5 \
+    --continue-at - --output "$partial" "$url" &
+  local curl_pid=$!
+  while kill -0 "$curl_pid" 2>/dev/null; do
+    if [[ -e "$partial" ]]; then
+      printf '[download] %s received for %s\n' "$(du -h "$partial" | awk '{print $1}')" "$(basename "$destination")"
+    else
+      printf '[download] waiting for %s\n' "$(basename "$destination")"
+    fi
+    sleep 10
+  done
+  if ! wait "$curl_pid"; then
+    echo "Download failed: $url" >&2
+    return 5
+  fi
+  if [[ -n "$expected_sha" ]]; then
+    echo "Verifying SHA-256: $(basename "$destination")"
+    if ! echo "$expected_sha  $partial" | sha256sum --check --status; then
+      echo "Checksum verification failed: $partial" >&2
+      exit 5
+    fi
   fi
   mv "$partial" "$destination"
+  echo "Download complete: $destination"
 }
 
 installation_mode=$(json_required '.comfyui.installation_mode')
+comfy_repo=$(json_required '.comfyui.repository')
 comfy_ref=$(json_required '.comfyui.ref')
 comfy_root=$(json_required '.comfyui.root')
 comfy_python=$(json_required '.comfyui.python')
@@ -67,11 +98,23 @@ if [[ "$installation_mode" != 'preinstalled' ]]; then
   echo "This provisioner requires comfyui.installation_mode=preinstalled." >&2
   exit 6
 fi
+
+stage 'Preparing the pinned ComfyUI checkout on the persistent volume'
 if [[ ! -d "$comfy_root/.git" ]]; then
-  echo "Preinstalled ComfyUI checkout not found at $comfy_root." >&2
-  echo "Use a fresh profile volume and a pinned vastai/comfy image." >&2
-  exit 6
+  if [[ -e "$comfy_root" && ! -d "$comfy_root" ]]; then
+    echo "$comfy_root exists but is not a directory; refusing to overwrite it." >&2
+    exit 6
+  fi
+  if [[ -d "$comfy_root" && -n "$(find "$comfy_root" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "$comfy_root is not empty and is not a Git checkout; refusing to overwrite it." >&2
+    exit 6
+  fi
+  echo "The persistent volume hides the image's original /workspace checkout."
+  echo "Cloning pinned ComfyUI release $comfy_ref into $comfy_root."
+  mkdir -p "$(dirname "$comfy_root")"
+  git clone --progress --branch "$comfy_ref" --single-branch "$comfy_repo" "$comfy_root"
 fi
+
 if [[ ! -x "$comfy_python" ]]; then
   echo "Preinstalled Python environment not found: $comfy_python" >&2
   exit 6
@@ -85,13 +128,18 @@ if [[ -z "$expected_commit" || "$current_commit" != "$expected_commit" ]]; then
   echo "Do not reuse a profile volume created by another image release." >&2
   exit 7
 fi
+
+stage 'Verifying the image Python and CUDA runtime'
 if ! "$comfy_python" -c 'import torch; assert torch.cuda.is_available()' >/dev/null 2>&1; then
   echo "The preinstalled image cannot access a CUDA-enabled PyTorch runtime." >&2
   exit 7
 fi
+"$comfy_python" -c 'import torch; print(f"PyTorch {torch.__version__}; CUDA available; GPU: {torch.cuda.get_device_name(0)}")'
 
+stage 'Preparing persistent workspace directories'
 mkdir -p /workspace/logs /workspace/bin "$project_root/workflows/original" "$project_root/records"
 
+stage 'Downloading and verifying Anima model files'
 while IFS=$'\t' read -r model_name model_folder model_url model_sha; do
   [[ -n "$model_name" && -n "$model_folder" && -n "$model_url" ]] || {
     echo "Invalid Anima model entry in configuration." >&2
@@ -100,6 +148,7 @@ while IFS=$'\t' read -r model_name model_folder model_url model_sha; do
   download_file "$model_url" "$comfy_root/models/$model_folder/$model_name" "$model_sha"
 done < <(jq -r '.anima.models[] | [.Name, .Folder, .Url, (.Sha256 // "")] | @tsv' "$deploy_config")
 
+stage 'Installing the workflow and baseline record'
 workflow_name=$(json_required '.anima.workflow_file_name')
 workflow_url=$(json_required '.anima.workflow_url')
 workflow_original="$project_root/workflows/original/$workflow_name"
@@ -118,14 +167,22 @@ the original workflow unchanged, preserve generation metadata, and change one
 prompt group, sampler parameter, or adapter weight at a time.
 EOF
 
+stage 'Restarting the ComfyUI Supervisor service'
+supervisorctl status "$service_name" || true
 supervisorctl restart "$service_name"
 
+stage 'Waiting for the ComfyUI health endpoint'
 health_url="http://${comfy_host}:${comfy_port}/system_stats"
 healthy=false
-for _ in $(seq 1 60); do
+for attempt in $(seq 1 60); do
   if curl --silent --fail "$health_url" >/dev/null; then
     healthy=true
+    echo "ComfyUI is healthy: $health_url"
     break
+  fi
+  if (( attempt % 5 == 0 )); then
+    echo "Still waiting for ComfyUI ($((attempt * 2)) seconds elapsed)..."
+    supervisorctl status "$service_name" || true
   fi
   sleep 2
 done
@@ -135,9 +192,11 @@ if [[ "$healthy" != true ]]; then
   exit 9
 fi
 
+stage 'Installing and verifying Codex and the complete deployment'
 if jq -e '.codex.install == true' "$deploy_config" >/dev/null; then
   bash "$(dirname "$0")/configure-codex.sh" "$deploy_config"
 fi
+bash "$(dirname "$0")/verify-deployment.sh" "$deploy_config"
 
 echo "Preinstalled-image provisioning complete."
 echo "ComfyUI release: $comfy_ref ($current_commit)"
