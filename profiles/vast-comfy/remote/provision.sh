@@ -92,6 +92,7 @@ comfy_python=$(json_required '.comfyui.python')
 comfy_host=$(json_required '.comfyui.listen_host')
 comfy_port=$(json_required '.comfyui.port')
 service_name=$(json_required '.comfyui.service_name')
+log_path=$(json_required '.comfyui.log_path')
 project_root=$(json_required '.codex.project_root')
 
 if [[ "$installation_mode" != 'preinstalled' ]]; then
@@ -167,8 +168,86 @@ the original workflow unchanged, preserve generation metadata, and change one
 prompt group, sampler parameter, or adapter weight at a time.
 EOF
 
-stage 'Restarting the ComfyUI Supervisor service'
-supervisorctl status "$service_name" || true
+stage 'Restoring the image service manager and starting ComfyUI'
+start_script=/workspace/bin/start-comfyui.sh
+{
+  echo '#!/usr/bin/env bash'
+  echo 'set -Eeuo pipefail'
+  printf 'cd %q\n' "$comfy_root"
+  printf 'exec %q main.py --listen %q --port %q' "$comfy_python" "$comfy_host" "$comfy_port"
+  while IFS= read -r argument; do
+    printf ' %q' "$argument"
+  done < <(jq -r '.comfyui.extra_args[]?' "$deploy_config")
+  printf '\n'
+} > "$start_script"
+chmod 0755 "$start_script"
+
+mkdir -p "$(dirname "$log_path")" /var/log/supervisor /var/run
+supervisor_config="/etc/supervisor/conf.d/${service_name}.conf"
+cat > "$supervisor_config" <<EOF
+[program:$service_name]
+command=$start_script
+directory=$comfy_root
+autostart=true
+autorestart=true
+startsecs=5
+stopasgroup=true
+killasgroup=true
+stdout_logfile=$log_path
+stdout_logfile_maxbytes=20MB
+stdout_logfile_backups=2
+redirect_stderr=true
+EOF
+
+# Vast's SSH launch mode replaces the image ENTRYPOINT. New deployments run
+# that entrypoint through --onstart-cmd, but this fallback repairs instances
+# created before that option was added.
+if ! supervisorctl pid >/dev/null 2>&1; then
+  echo 'Supervisor is not ready; waiting for the image on-start boot chain...'
+  for _ in $(seq 1 15); do
+    supervisorctl pid >/dev/null 2>&1 && break
+    sleep 2
+  done
+fi
+if ! supervisorctl pid >/dev/null 2>&1; then
+  if pgrep -x supervisord >/dev/null 2>&1; then
+    echo 'A supervisord process exists but its control socket is unavailable.' >&2
+    tail -n 100 /var/log/supervisor/supervisord.log 2>/dev/null || true
+    exit 7
+  fi
+  echo 'The image entrypoint was not run by Vast SSH mode; starting Supervisor directly.'
+  supervisord -c /etc/supervisor/supervisord.conf
+  for _ in $(seq 1 15); do
+    supervisorctl pid >/dev/null 2>&1 && break
+    sleep 2
+  done
+fi
+if ! supervisorctl pid >/dev/null 2>&1; then
+  echo 'Supervisor did not create its control socket.' >&2
+  tail -n 100 /var/log/supervisor/supervisord.log 2>/dev/null || true
+  exit 7
+fi
+
+# Contracts created before --onstart-cmd was added need a restart-safe
+# fallback. Vast SSH mode runs /root/onstart.sh after every container start.
+onstart_script=/root/onstart.sh
+onstart_marker='# anima-vast-deploy: restore supervisor'
+touch "$onstart_script"
+if ! grep -Fq "$onstart_marker" "$onstart_script"; then
+  cat >> "$onstart_script" <<'EOF'
+
+# anima-vast-deploy: restore supervisor
+if command -v supervisorctl >/dev/null 2>&1 && ! supervisorctl pid >/dev/null 2>&1; then
+  mkdir -p /var/log/supervisor /var/run
+  supervisord -c /etc/supervisor/supervisord.conf
+fi
+EOF
+  chmod 0755 "$onstart_script"
+  echo 'Installed a restart-safe Supervisor fallback in /root/onstart.sh.'
+fi
+
+supervisorctl reread
+supervisorctl update
 supervisorctl restart "$service_name"
 
 stage 'Waiting for the ComfyUI health endpoint'
@@ -189,6 +268,7 @@ done
 if [[ "$healthy" != true ]]; then
   echo "ComfyUI did not become healthy at $health_url" >&2
   supervisorctl tail -100 "$service_name" || true
+  tail -n 100 "$log_path" 2>/dev/null || true
   exit 9
 fi
 

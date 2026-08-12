@@ -22,6 +22,9 @@
             Label = 'anima-comfyui-preinstalled'
             # Pin the complete tag. Upgrade Image and ComfyUI.Ref together.
             Image = 'vastai/comfy:v0.28.0-cuda-12.9-py312'
+            # Vast SSH launch mode replaces Docker ENTRYPOINT. This restores
+            # the image boot chain (Supervisor, ComfyUI, and portal services).
+            OnStartCommand = '/opt/instance-tools/bin/entrypoint.sh'
             ContainerDiskGb = 30
             DirectSsh = $true
             WaitTimeoutSeconds = 900

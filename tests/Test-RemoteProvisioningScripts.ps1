@@ -13,7 +13,10 @@ $preinstalledExpectations = @(
     "git clone --progress --branch `"`$comfy_ref`" --single-branch",
     "The persistent volume hides the image's original /workspace checkout.",
     '[download]',
-    'verify-deployment.sh'
+    'verify-deployment.sh',
+    'The image entrypoint was not run by Vast SSH mode; starting Supervisor directly.',
+    'start-comfyui.sh',
+    'restore supervisor'
 )
 foreach ($expected in $preinstalledExpectations) {
     if (-not $preinstalledProvision.Contains($expected)) {
@@ -29,11 +32,15 @@ foreach ($expected in @('ComfyUI checkout', 'CUDA Python runtime', 'Supervisor s
         throw "Remote verification is missing a required check: $expected"
     }
 }
-if (-not $managedProvision.Contains('verify-deployment.sh')) {
-    throw 'Managed-image provisioning does not run the common remote verification.'
+foreach ($expected in @('verify-deployment.sh', 'starting Supervisor directly')) {
+    if (-not $managedProvision.Contains($expected)) {
+        throw "Managed-image provisioning is missing expected recovery behavior: $expected"
+    }
 }
 if (-not $localProvision.Contains('Uploading the remote verification script failed.') -or
-    -not $localProvision.Contains('[local 4/5]')) {
+    -not $localProvision.Contains('[local 4/5]') -or
+    -not $localProvision.Contains('Wait-VastSshReady') -or
+    -not $localProvision.Contains('Invoke-NativeCommandCheckedWithRetry')) {
     throw 'Local provisioning does not upload verification or display staged progress.'
 }
 if (-not $remoteCli.Contains('tmux new-session -A -s anima') -or

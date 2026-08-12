@@ -109,6 +109,8 @@ ComfyUI 端口和 Codex 参数：
 
 如果实例已经创建、但等待运行或 provision 阶段中断，再次选择 `Deploy` 会从已有实例继续，不会重新租用实例或创建持久卷。
 
+Vast 的 SSH 启动模式会替换镜像原有的 Docker ENTRYPOINT。因此脚本在创建 `vastai/comfy` 和 `vastai/base-image` 实例时通过 `--onstart-cmd` 恢复镜像启动链，确保 Supervisor 与 ComfyUI 服务启动。Vast 报告 `running` 后，脚本还会等待 SSH 实际可执行命令，并对初始化目录和文件上传进行重试；`running` 不再被误认为 SSH 已经完全就绪。对于修复前已创建的实例，重新执行配置部署会自动启动缺失的 Supervisor，无需重新下载已经校验通过的模型。
+
 ## 两套独立部署配置
 
 | 项目 | `vast-comfy`（默认推荐） | `base-image` |

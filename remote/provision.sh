@@ -155,6 +155,49 @@ stdout_logfile_backups=2
 redirect_stderr=true
 EOF
 
+# Vast SSH launch mode replaces Docker ENTRYPOINT. Normally OnStartCommand
+# restores the base-image boot chain; this fallback supports older instances.
+if ! supervisorctl pid >/dev/null 2>&1; then
+  echo 'Supervisor is not ready; waiting for the image on-start boot chain...'
+  for _ in $(seq 1 15); do
+    supervisorctl pid >/dev/null 2>&1 && break
+    sleep 2
+  done
+fi
+if ! supervisorctl pid >/dev/null 2>&1; then
+  if pgrep -x supervisord >/dev/null 2>&1; then
+    echo 'A supervisord process exists but its control socket is unavailable.' >&2
+    tail -n 100 /var/log/supervisor/supervisord.log 2>/dev/null || true
+    exit 9
+  fi
+  echo 'The image entrypoint was not run by Vast SSH mode; starting Supervisor directly.'
+  mkdir -p /var/log/supervisor /var/run
+  supervisord -c /etc/supervisor/supervisord.conf
+  for _ in $(seq 1 15); do
+    supervisorctl pid >/dev/null 2>&1 && break
+    sleep 2
+  done
+fi
+if ! supervisorctl pid >/dev/null 2>&1; then
+  echo 'Supervisor did not create its control socket.' >&2
+  exit 9
+fi
+onstart_script=/root/onstart.sh
+onstart_marker='# anima-vast-deploy: restore supervisor'
+touch "$onstart_script"
+if ! grep -Fq "$onstart_marker" "$onstart_script"; then
+  cat >> "$onstart_script" <<'EOF'
+
+# anima-vast-deploy: restore supervisor
+if command -v supervisorctl >/dev/null 2>&1 && ! supervisorctl pid >/dev/null 2>&1; then
+  mkdir -p /var/log/supervisor /var/run
+  supervisord -c /etc/supervisor/supervisord.conf
+fi
+EOF
+  chmod 0755 "$onstart_script"
+  echo 'Installed a restart-safe Supervisor fallback in /root/onstart.sh.'
+fi
+
 supervisorctl reread
 supervisorctl update
 supervisorctl restart "$service_name"

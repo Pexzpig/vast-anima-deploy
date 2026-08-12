@@ -26,6 +26,7 @@
         Instance = @{
             Label = 'anima-comfyui-example'
             Image = 'vastai/base-image:cuda-12.8.1-cudnn-devel-ubuntu22.04-py310'
+            OnStartCommand = '/opt/instance-tools/bin/entrypoint.sh'
             ContainerDiskGb = 30
             DirectSsh = $true
             WaitTimeoutSeconds = 900

@@ -26,7 +26,9 @@ foreach ($expected in @(
     'Select deployment storage',
     'Storage: instance disk only',
     "volume_status = if (`$usePersistentVolume) { 'pending' } else { 'disabled' }",
-    "storage_mode = if (`$usePersistentVolume) { 'volume' } else { 'instance_disk' }"
+    "storage_mode = if (`$usePersistentVolume) { 'volume' } else { 'instance_disk' }",
+    "@('--onstart-cmd', `$onStartCommand)",
+    'Wait-VastSshReady'
 )) {
     if (-not $deploymentScript.Contains($expected)) {
         throw "Deployment storage selection is missing expected behavior: $expected"

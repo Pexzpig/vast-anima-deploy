@@ -12,6 +12,7 @@ Write-Host '[local 1/5] Waiting for the Vast.ai instance and resolving its SSH e
 Wait-VastInstanceRunning -Config $config -InstanceId $state.instance_id | Out-Null
 $endpoint = Get-VastSshEndpoint -Config $config -InstanceId $state.instance_id
 $sshCommon = @(Get-SshCommonArguments -Config $config)
+Wait-VastSshReady -Config $config -Endpoint $endpoint
 
 Write-Host '[local 2/5] Generating the remote deployment configuration...' -ForegroundColor Cyan
 $remoteConfig = [ordered]@{
@@ -69,26 +70,26 @@ foreach ($requiredScript in @($provisionScriptPath, $codexScriptPath, $verifyScr
 
 $target = "$($endpoint.User)@$($endpoint.Host)"
 Write-Host "[local 3/5] Uploading deployment scripts to $target..." -ForegroundColor Cyan
-Invoke-NativeCommandChecked -Command 'ssh' -Arguments ($sshCommon + @(
+Invoke-NativeCommandCheckedWithRetry -Command 'ssh' -Arguments ($sshCommon + @(
     '-p', [string]$endpoint.Port, $target, "mkdir -p '$remoteUploadDirectory/remote'"
-)) -FailureMessage 'Could not create remote upload directory.'
+)) -FailureMessage 'Could not create remote upload directory.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 60
 
 $scpCommon = @()
 for ($i = 0; $i -lt $sshCommon.Count; $i += 2) {
     $scpCommon += @($sshCommon[$i], $sshCommon[$i + 1])
 }
-Invoke-NativeCommandChecked -Command 'scp' -Arguments ($scpCommon + @(
+Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $provisionScriptPath, "${target}:$remoteUploadDirectory/remote/provision.sh"
-)) -FailureMessage 'Uploading the remote provision script failed.'
-Invoke-NativeCommandChecked -Command 'scp' -Arguments ($scpCommon + @(
+)) -FailureMessage 'Uploading the remote provision script failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120
+Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $codexScriptPath, "${target}:$remoteUploadDirectory/remote/configure-codex.sh"
-)) -FailureMessage 'Uploading the remote Codex script failed.'
-Invoke-NativeCommandChecked -Command 'scp' -Arguments ($scpCommon + @(
+)) -FailureMessage 'Uploading the remote Codex script failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120
+Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $verifyScriptPath, "${target}:$remoteUploadDirectory/remote/verify-deployment.sh"
-)) -FailureMessage 'Uploading the remote verification script failed.'
-Invoke-NativeCommandChecked -Command 'scp' -Arguments ($scpCommon + @(
+)) -FailureMessage 'Uploading the remote verification script failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120
+Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $generatedConfig, "${target}:$remoteUploadDirectory/remote-config.json"
-)) -FailureMessage 'Uploading remote configuration failed.'
+)) -FailureMessage 'Uploading remote configuration failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120
 
 Write-Host '[local 4/5] Running remote provisioning; model downloads can take a long time.' -ForegroundColor Cyan
 Write-Host 'Progress and downloaded sizes will be printed below. Interrupted downloads resume from .part files.' -ForegroundColor DarkCyan

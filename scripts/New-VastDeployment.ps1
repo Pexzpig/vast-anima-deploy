@@ -282,7 +282,21 @@ $createArguments = @(
     '--image', [string]$config.Vast.Instance.Image,
     '--disk', [string]$config.Vast.Instance.ContainerDiskGb,
     '--label', [string]$config.Vast.Instance.Label,
-    '--ssh', '--direct', '--cancel-unavail',
+    '--ssh', '--direct', '--cancel-unavail'
+)
+$onStartCommand = if ($config.Vast.Instance.ContainsKey('OnStartCommand')) {
+    [string]$config.Vast.Instance.OnStartCommand
+} elseif ([string]$config.Vast.Instance.Image -match '^vastai/(?:comfy|base-image):') {
+    '/opt/instance-tools/bin/entrypoint.sh'
+} else {
+    ''
+}
+if ($onStartCommand) {
+    # Vast SSH launch mode replaces the image ENTRYPOINT. Running the original
+    # Vast image entrypoint from onstart brings up Supervisor and app services.
+    $createArguments += @('--onstart-cmd', $onStartCommand)
+}
+$createArguments += @(
     '--env', (ConvertTo-DockerEnvironmentString -Environment $config.Vast.Instance.Environment),
     '--raw'
 )
@@ -314,5 +328,7 @@ $state.ssh_host = $endpoint.Host
 $state.ssh_port = $endpoint.Port
 Save-DeploymentState -Config $config -State $state | Out-Null
 
-Write-Host "Instance is ready: ssh $($endpoint.User)@$($endpoint.Host) -p $($endpoint.Port)" -ForegroundColor Green
+Write-Host 'Vast reports the container as running; waiting for the injected SSH service to become stable...' -ForegroundColor Cyan
+Wait-VastSshReady -Config $config -Endpoint $endpoint
+Write-Host "Instance and SSH are ready: ssh $($endpoint.User)@$($endpoint.Host) -p $($endpoint.Port)" -ForegroundColor Green
 Write-Host "Next: .\scripts\Provision-Instance.ps1"

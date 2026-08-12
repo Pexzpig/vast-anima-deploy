@@ -232,6 +232,34 @@ function Invoke-NativeCommandChecked {
     }
 }
 
+function Invoke-NativeCommandCheckedWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [string[]]$Arguments = @(),
+        [Parameter(Mandatory = $true)][string]$FailureMessage,
+        [ValidateRange(1, 20)][int]$Attempts = 4,
+        [ValidateRange(0, 300)][int]$DelaySeconds = 5,
+        [ValidateRange(0, 3600)][int]$TimeoutSeconds = 0
+    )
+
+    $lastResult = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $lastResult = Invoke-NativeCommandCapture `
+            -Command $Command `
+            -Arguments $Arguments `
+            -TimeoutSeconds $TimeoutSeconds
+        $lastResult.Output | ForEach-Object { Write-Host $_ }
+        if ($lastResult.ExitCode -eq 0) { return }
+
+        if ($attempt -lt $Attempts) {
+            Write-Warning "$Command failed with exit code $($lastResult.ExitCode) (attempt $attempt/$Attempts). Retrying in $DelaySeconds seconds..."
+            if ($DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
+        }
+    }
+
+    throw "$FailureMessage Native command failed after $Attempts attempts with exit code $($lastResult.ExitCode).`n$($lastResult.Text)"
+}
+
 function Get-VastAuthenticationStatus {
     param([Parameter(Mandatory = $true)][string]$CliPath)
 
@@ -742,7 +770,10 @@ function Get-SshCommonArguments {
 
     $arguments = @(
         '-o', "StrictHostKeyChecking=$($Config.Vast.Ssh.StrictHostKeyChecking)",
-        '-o', "ConnectTimeout=$($Config.Vast.Ssh.ConnectTimeoutSeconds)"
+        '-o', "ConnectTimeout=$($Config.Vast.Ssh.ConnectTimeoutSeconds)",
+        '-o', 'BatchMode=yes',
+        '-o', 'ServerAliveInterval=10',
+        '-o', 'ServerAliveCountMax=3'
     )
     $identity = Resolve-SshIdentityPath -Path ([string]$Config.Vast.Ssh.IdentityFile)
     if (-not $identity) {
@@ -764,6 +795,43 @@ function Get-SshCommonArguments {
         $arguments += @('-i', $identity)
     }
     return $arguments
+}
+
+function Wait-VastSshReady {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [Parameter(Mandatory = $true)]$Endpoint,
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 180,
+        [ValidateRange(1, 60)][int]$PollIntervalSeconds = 5
+    )
+
+    Assert-CommandExists -Name 'ssh'
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $attempt = 0
+    $lastResult = $null
+    $sshCommon = @(Get-SshCommonArguments -Config $Config)
+    $target = "$($Endpoint.User)@$($Endpoint.Host)"
+
+    while ((Get-Date) -lt $deadline) {
+        $attempt++
+        $lastResult = Invoke-NativeCommandCapture -Command 'ssh' -Arguments ($sshCommon + @(
+            '-o', 'ConnectionAttempts=1',
+            '-p', [string]$Endpoint.Port,
+            $target,
+            "printf 'SSH_READY\\n'"
+        ))
+        if ($lastResult.ExitCode -eq 0 -and $lastResult.Text -match 'SSH_READY') {
+            Write-Host "SSH is ready at ${target}:$($Endpoint.Port) (attempt $attempt)." -ForegroundColor Green
+            return
+        }
+
+        $detail = if ($lastResult.Text) { ($lastResult.Text -split "`r?`n")[-1] } else { "exit $($lastResult.ExitCode)" }
+        Write-Host "SSH is not ready yet (attempt $attempt): $detail" -ForegroundColor DarkYellow
+        Start-Sleep -Seconds $PollIntervalSeconds
+    }
+
+    $lastText = if ($null -ne $lastResult) { $lastResult.Text } else { 'No SSH attempt completed.' }
+    throw "Timed out after $TimeoutSeconds seconds waiting for SSH at ${target}:$($Endpoint.Port).`n$lastText"
 }
 
 function Invoke-RemoteDeploymentVerification {
