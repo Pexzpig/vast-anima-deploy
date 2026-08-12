@@ -80,6 +80,23 @@ user-config/
 .\Start-VastAnima.ps1 -Action SwitchProfile
 ```
 
+连接当前配置对应的远端命令行，并在连接前显示实例、GPU、价格、持久卷、
+ComfyUI 端口和 Codex 参数：
+
+```powershell
+# 实例已经运行：显示参数并进入远端 shell
+.\Open-VastRemoteCli.ps1
+
+# 实例已经停止：恢复 GPU 计费、等待启动，然后进入远端 shell
+.\Open-VastRemoteCli.ps1 -StartIfStopped
+
+# 只显示参数和可复制的 SSH 命令，不实际连接
+.\Open-VastRemoteCli.ps1 -ShowOnly
+```
+
+该入口只操作当前 `launcher.json` 选中的配置，不会创建实例或持久卷。
+实例重启后会重新查询 SSH 主机和端口；不要继续使用旧日志中的端口。
+
 `Search` 会在报价表中以 `price_USD_hour` 明确显示实例每小时美元价格。`Deploy` 会先校验配置并实时搜索，然后显示带序号、型号、显存、价格、可靠度、网速和机器 ID 的候选卡，由用户选择具体报价。若所选机器没有符合要求的持久卷，脚本会要求改选其他卡。最终确认页会显示实际实例单价、持久卷月价和估算合计时价；只有输入 `RENT` 才会创建和计费。没有任何远端资源 ID 的中断记录会标记为“未创建（可重试）”，不会阻塞下一次部署。
 
 `Destroy` 和 `RemoveVolume` 分开确认。销毁实例不会自动删除单独创建的持久卷；停止实例后，实例磁盘和卷仍会产生存储费用。
