@@ -144,6 +144,69 @@ checkout_repository() {
   fi
 }
 
+checkout_pinned_repository() {
+  local repository=$1
+  local commit=$2
+  local root=$3
+
+  [[ "$commit" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "Pinned application commit is invalid: $commit" >&2; exit 6; }
+  if [[ -d "$root/.git" ]]; then
+    local existing_origin
+    existing_origin=$(git -C "$root" remote get-url origin 2>/dev/null || true)
+    if [[ "$existing_origin" != "$repository" ]]; then
+      echo "Application checkout $root has unexpected origin: ${existing_origin:-missing}" >&2
+      exit 6
+    fi
+    echo "Using existing pinned checkout: $root"
+  elif [[ -e "$root" && -n "$(find "$root" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    echo "$root is non-empty and is not a Git checkout; refusing to overwrite it." >&2
+    exit 6
+  else
+    mkdir -p "$(dirname "$root")"
+    git clone --filter=blob:none --no-checkout "$repository" "$root"
+  fi
+
+  git -C "$root" fetch --no-tags origin "$commit"
+  git -C "$root" checkout --detach --force "$commit"
+  local actual_commit
+  actual_commit=$(git -C "$root" rev-parse HEAD)
+  if [[ "$actual_commit" != "$commit" ]]; then
+    echo "Pinned application checkout mismatch at $root: $actual_commit != $commit" >&2
+    exit 6
+  fi
+}
+
+checkout_managed_repository() {
+  local repository=$1
+  local commit=$2
+  local root=$3
+
+  if [[ -d "$root/.git" ]]; then
+    local existing_origin
+    existing_origin=$(git -C "$root" remote get-url origin 2>/dev/null || true)
+    if [[ "$existing_origin" != "$repository" ]]; then
+      echo "Managed extension $root has unexpected origin: ${existing_origin:-missing}" >&2
+      exit 6
+    fi
+    echo "Updating managed extension: $root"
+  elif [[ -e "$root" && -n "$(find "$root" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    echo "$root is non-empty and is not the managed Git checkout; refusing to overwrite it." >&2
+    exit 6
+  else
+    mkdir -p "$(dirname "$root")"
+    git clone --filter=blob:none --no-checkout "$repository" "$root"
+  fi
+
+  git -C "$root" fetch --no-tags origin "$commit"
+  git -C "$root" checkout --detach --force "$commit"
+  local actual_commit
+  actual_commit=$(git -C "$root" rev-parse HEAD)
+  if [[ "$actual_commit" != "$commit" ]]; then
+    echo "Managed extension checkout mismatch at $root: $actual_commit != $commit" >&2
+    exit 6
+  fi
+}
+
 stage 'Installing uv and preparing workspace directories'
 "$base_python" -m pip install --upgrade uv
 uv_bin=$(command -v uv || true)
@@ -158,6 +221,7 @@ project_root=$(json_required '.codex.project_root')
 mkdir -p /workspace/logs /workspace/bin /workspace/venvs "$project_root/records"
 
 stage "Preparing the selected application: $application_type"
+webui_configuration_deferred=false
 if [[ "$application_type" == 'comfyui' ]]; then
   app_repo=$(json_required '.comfyui.repository')
   app_ref=$(json_required '.comfyui.ref')
@@ -176,23 +240,78 @@ if [[ "$application_type" == 'comfyui' ]]; then
   "$uv_bin" pip install --python "$app_python" -r "$app_root/requirements.txt"
 else
   app_repo=$(json_required '.webui.repository')
-  app_ref=$(json_required '.webui.ref')
+  app_ref=$(json_required '.webui.commit')
   app_root=$(json_required '.webui.root')
   app_venv=$(json_required '.webui.venv')
   app_python=$(json_required '.webui.python')
   app_python_version=$(json_required '.webui.python_version')
+  app_torch_version=$(json_required '.webui.torch_version')
+  app_torchvision_version=$(json_required '.webui.torchvision_version')
+  app_torch_cuda_version=$(json_required '.webui.torch_cuda_version')
+  app_torch_index_url=$(json_required '.webui.torch_index_url')
   app_host=$(json_required '.webui.listen_host')
   app_port=$(json_required '.webui.port')
   service_name=$(json_required '.webui.service_name')
   log_path=$(json_required '.webui.log_path')
 
-  checkout_repository "$app_repo" "$app_ref" "$app_root"
+  checkout_pinned_repository "$app_repo" "$app_ref" "$app_root"
   export UV_PYTHON_INSTALL_DIR=/workspace/.uv/python
-  if [[ ! -x "$app_python" ]]; then
+  if [[ "$app_venv" != /workspace/venvs/* || "$app_venv" == '/workspace/venvs/' || "$app_python" != "$app_venv/bin/python" ]]; then
+    echo "Unsafe managed WebUI virtual environment path: $app_venv" >&2
+    exit 6
+  fi
+
+  webui_environment_matches() {
+    [[ -x "$app_python" ]] || return 1
+    "$app_python" - "$app_python_version" "$app_torch_version" "$app_torchvision_version" "$app_torch_cuda_version" <<'PY'
+import importlib.metadata
+import sys
+import torch
+
+expected_python, expected_torch, expected_torchvision, expected_cuda = sys.argv[1:]
+actual_python = f"{sys.version_info.major}.{sys.version_info.minor}"
+actual_torch = torch.__version__.split("+", 1)[0]
+actual_torchvision = importlib.metadata.version("torchvision").split("+", 1)[0]
+assert actual_python == expected_python, f"Python {actual_python} != {expected_python}"
+assert actual_torch == expected_torch, f"torch {actual_torch} != {expected_torch}"
+assert actual_torchvision == expected_torchvision, f"torchvision {actual_torchvision} != {expected_torchvision}"
+assert torch.version.cuda == expected_cuda, f"torch CUDA {torch.version.cuda} != {expected_cuda}"
+assert torch.cuda.is_available(), "WebUI PyTorch cannot access the GPU"
+PY
+  }
+
+  webui_environment_ready=false
+  if webui_environment_matches >/dev/null 2>&1; then
+    webui_environment_ready=true
+    echo "Reusing validated managed WebUI environment: $app_venv"
+  elif [[ -e "$app_venv" ]]; then
+    echo "Rebuilding incompatible managed WebUI environment: $app_venv"
+    rm -rf -- "$app_venv"
+  fi
+  if [[ "$webui_environment_ready" != true ]]; then
     "$uv_bin" python install "$app_python_version"
     "$uv_bin" venv "$app_venv" --python "$app_python_version" --seed
+    "$uv_bin" pip install --python "$app_python" --index-url "$app_torch_index_url" \
+      "torch==$app_torch_version" "torchvision==$app_torchvision_version"
+    webui_environment_matches || {
+      echo "Pinned WebUI PyTorch environment failed validation." >&2
+      exit 6
+    }
   fi
   mkdir -p "$app_root/models/Stable-diffusion" "$app_root/models/text_encoder" "$app_root/models/VAE"
+  while IFS=$'\t' read -r extension_name extension_repository extension_commit; do
+    [[ "$extension_name" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Unsafe managed extension name: $extension_name" >&2; exit 6; }
+    checkout_managed_repository "$extension_repository" "$extension_commit" "$app_root/extensions/$extension_name"
+  done < <(jq -r '.webui.extensions[] | select(.Enabled == true) | [.Name, .Repository, .Commit] | @tsv' "$deploy_config")
+  webui_prepare_result=$("$base_python" "$(dirname "$0")/configure-application.py" prepare-webui \
+    "$deploy_config" "$app_root/config.json" "$project_root/records")
+  if [[ "$webui_prepare_result" == deferred* ]]; then
+    webui_configuration_deferred=true
+    if [[ "$webui_prepare_result" == deferred:* ]]; then
+      echo "Preserved the premature WebUI config as: ${webui_prepare_result#deferred:}"
+    fi
+    echo 'Deferring managed WebUI settings until Forge creates its versioned config.json.'
+  fi
   chmod 0755 "$app_root/webui.sh" "$app_root/webui-user.sh" 2>/dev/null || true
 fi
 
@@ -204,8 +323,12 @@ assert torch.cuda.is_available(), 'application torch cannot access CUDA'
 print(f'ComfyUI environment: torch={torch.__version__}, cuda={torch.version.cuda}, gpu={torch.cuda.get_device_name(0)}')
 PY
 else
-  echo "Forge Python environment: $($app_python --version)"
-  echo 'Forge installs its pinned GPU packages during its first supervised launch.'
+  "$app_python" - <<'PY'
+import importlib.metadata
+import torch
+assert torch.cuda.is_available(), 'Forge PyTorch cannot access CUDA'
+print(f'Forge environment: torch={torch.__version__}, torchvision={importlib.metadata.version("torchvision")}, cuda={torch.version.cuda}, gpu={torch.cuda.get_device_name(0)}')
+PY
 fi
 
 stage 'Downloading and verifying Anima model files'
@@ -223,10 +346,20 @@ mkdir -p "$project_root/workflows/original"
 workflow_name=$(json_required '.anima.workflow_file_name')
 if [[ "$application_type" == 'comfyui' ]]; then
   workflow_url=$(json_required '.anima.workflow_url')
+  workflow_sha=$(json_required '.anima.workflow_sha256')
+  managed_workflow_name=$(json_required '.anima.managed_workflow_file_name')
   workflow_original="$project_root/workflows/original/$workflow_name"
-  download_file "$workflow_url" "$workflow_original" ''
+  workflow_managed="$project_root/workflows/$managed_workflow_name"
+  workflow_installed="$app_root/user/default/workflows/$managed_workflow_name"
+  if [[ -s "$workflow_original" ]] && ! echo "$workflow_sha  $workflow_original" | sha256sum --check --status; then
+    workflow_backup="${workflow_original}.pre-pinned.$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$workflow_original" "$workflow_backup"
+    echo "Preserved the previous unpinned workflow as: $workflow_backup"
+  fi
+  download_file "$workflow_url" "$workflow_original" "$workflow_sha"
   mkdir -p "$app_root/user/default/workflows"
-  cp -n "$workflow_original" "$app_root/user/default/workflows/$workflow_name" || true
+  "$base_python" "$(dirname "$0")/configure-application.py" configure-workflow \
+    "$deploy_config" "$workflow_original" "$workflow_managed" "$workflow_installed"
 else
   workflow_original='not used by Forge WebUI'
 fi
@@ -254,6 +387,8 @@ else
     printf 'export PATH=%q:"$PATH"\n' "$app_venv/bin"
     printf 'export python_cmd=%q\n' "$app_python"
     printf 'export venv_dir=%q\n' "$app_venv"
+    printf 'export TORCH_INDEX_URL=%q\n' "$app_torch_index_url"
+    printf 'export TORCH_COMMAND=%q\n' "pip install torch==$app_torch_version torchvision==$app_torchvision_version --index-url $app_torch_index_url"
     printf 'exec %q launch.py --port %q' "$app_python" "$app_port"
     while IFS= read -r argument; do printf ' %q' "$argument"; done < <(jq -r '.webui.extra_args[]?' "$deploy_config")
     printf '\n'
@@ -304,24 +439,42 @@ fi
 stage "Waiting for the $application_type health endpoint"
 health_url="http://${app_host}:${app_port}"
 if [[ "$application_type" == 'comfyui' ]]; then health_url+='/system_stats'; fi
-healthy=false
-for attempt in $(seq 1 450); do
-  if curl --silent --fail --max-time 5 "$health_url" >/dev/null; then
-    healthy=true
-    echo "$application_type is healthy: $health_url"
-    break
+wait_for_application_health() {
+  local context=${1:-}
+  local healthy=false
+  local attempt
+  for attempt in $(seq 1 450); do
+    if curl --silent --fail --max-time 5 "$health_url" >/dev/null; then
+      healthy=true
+      echo "$application_type is healthy${context}: $health_url"
+      break
+    fi
+    supervisor_state=$(supervisorctl status "$service_name" 2>/dev/null | awk '{print $2}' || true)
+    if [[ "$supervisor_state" == 'FATAL' || "$supervisor_state" == 'EXITED' ]]; then
+      echo "$service_name entered $supervisor_state while waiting for its health endpoint." >&2
+      tail -n 120 "$log_path" 2>/dev/null || true
+      return 1
+    fi
+    if (( attempt % 10 == 0 )); then
+      echo "Still waiting for $application_type${context} ($((attempt * 2)) seconds elapsed)..."
+      supervisorctl status "$service_name" || true
+      tail -n 8 "$log_path" 2>/dev/null || true
+    fi
+    sleep 2
+  done
+  if [[ "$healthy" != true ]]; then
+    echo "$application_type did not become healthy${context} at $health_url" >&2
+    tail -n 120 "$log_path" 2>/dev/null || true
+    return 1
   fi
-  if (( attempt % 10 == 0 )); then
-    echo "Still waiting for $application_type ($((attempt * 2)) seconds elapsed)..."
-    supervisorctl status "$service_name" || true
-    tail -n 8 "$log_path" 2>/dev/null || true
-  fi
-  sleep 2
-done
-if [[ "$healthy" != true ]]; then
-  echo "$application_type did not become healthy at $health_url" >&2
-  tail -n 120 "$log_path" 2>/dev/null || true
-  exit 9
+}
+
+wait_for_application_health
+if [[ "$application_type" == 'webui' && "$webui_configuration_deferred" == true ]]; then
+  "$base_python" "$(dirname "$0")/configure-application.py" configure-webui "$deploy_config" "$app_root/config.json"
+  echo 'Managed WebUI extensions and localization were applied after Forge initialization; restarting once.'
+  supervisorctl restart "$service_name"
+  wait_for_application_health ' after managed configuration'
 fi
 
 stage 'Installing Codex CLI and project configuration'
@@ -331,6 +484,25 @@ fi
 
 stage 'Running complete deployment verification'
 bash "$(dirname "$0")/verify-deployment.sh" "$deploy_config"
+
+manifest_path=/workspace/anima-project/records/vast-anima-deploy-manifest.json
+mkdir -p "$(dirname "$manifest_path")"
+manifest_temporary="${manifest_path}.tmp"
+jq -n \
+  --arg created_by 'vast-anima-deploy' \
+  --arg application_type "$application_type" \
+  --arg deployment_image "$(json_required '.deployment_image')" \
+  --arg service_name "$service_name" \
+  --arg listen_host "$app_host" \
+  --argjson remote_port "$app_port" \
+  --argjson local_port "$(json_required ".${application_type}.local_port")" \
+  --arg application_root "$app_root" \
+  --arg verified_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{schema_version:1, created_by:$created_by, application_type:$application_type,
+    deployment_image:$deployment_image, service_name:$service_name,
+    listen_host:$listen_host, remote_port:$remote_port, local_port:$local_port,
+    application_root:$application_root, verified_at:$verified_at}' > "$manifest_temporary"
+mv "$manifest_temporary" "$manifest_path"
 
 echo "PyTorch-based $application_type provisioning complete."
 echo "Application root: $app_root"

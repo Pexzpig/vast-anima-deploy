@@ -20,6 +20,25 @@ if ([string]$config.WebUI.Repository -ne 'https://github.com/Haoming02/sd-webui-
     [string]$config.WebUI.Ref -ne 'neo') {
     throw 'Forge Classic WebUI repository or branch is incorrect.'
 }
+if ([string]$config.WebUI.Commit -ne '6e8086edeaef473eb05b48b55518802fadf5bba1' -or
+    [string]$config.WebUI.TorchVersion -ne '2.11.0' -or
+    [string]$config.WebUI.TorchvisionVersion -ne '0.26.0' -or
+    [string]$config.WebUI.TorchCudaVersion -ne '12.8' -or
+    [string]$config.WebUI.TorchIndexUrl -ne 'https://download.pytorch.org/whl/cu128') {
+    throw 'Forge Classic WebUI application or CUDA/PyTorch dependencies are not pinned.'
+}
+if ([string]$config.Anima.WorkflowSha256 -ne 'f5d093bfb97409b5e3798394044baa8e775235335ffb881f0de0bf09a470cfe2' -or
+    [string]$config.Anima.WorkflowUrl -notmatch '12199d938df3c531853036116c145286790a7be7' -or
+    [string]$config.Anima.ManagedWorkflowFileName -ne 'image_anima_base_v1.managed.json') {
+    throw 'The pinned or managed Anima workflow configuration is incorrect.'
+}
+$extensionCommits = @{}
+foreach ($extension in @($config.WebUI.Extensions)) { $extensionCommits[[string]$extension.Name] = [string]$extension.Commit }
+if ($config.WebUI.Localization -ne 'zh_CN' -or
+    $extensionCommits['tag-autocomplete'] -ne '8766965a305b09aee4aa65aa754f84feaf801437' -or
+    $extensionCommits['stable-diffusion-webui-localization-zh_CN'] -ne '3b310d9c72c78264ab37d7651ab2638945e28dd8') {
+    throw 'Pinned WebUI extensions or localization are incorrect.'
+}
 
 $entryText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Start-VastAnima.ps1') -Raw -Encoding UTF8
 if ($entryText.Contains('launcher.json') -or $entryText.Contains('profile')) {
@@ -29,11 +48,25 @@ foreach ($expected in @(
     "'9' = 'Test'",
     "'10' = 'Destroy'",
     "'11' = 'RemoveVolume'",
+    "'12' = 'ConnectExisting'",
     'user-config\deployment.json'
 )) {
     if (-not $entryText.Contains($expected)) {
         throw "The single-deployment entry point is missing expected behavior: $expected"
     }
+}
+foreach ($expected in @(
+    'Sync-StartupAccountInstances',
+    'Get-VastAccountInstances -Config $Config -TimeoutSeconds 30',
+    'Sync-DeploymentInstanceState -Config $Config -State $state -AccountInstances $instances',
+    '$startupAccountInstances = @(Sync-StartupAccountInstances -Config $config)'
+)) {
+    if (-not $entryText.Contains($expected)) {
+        throw "The main entry point is missing startup account reconciliation: $expected"
+    }
+}
+if ([regex]::Matches($entryText, '\$startupAccountInstances\s*=\s*@\(Sync-StartupAccountInstances').Count -ne 1) {
+    throw 'Startup account reconciliation is not invoked exactly once per entry-script run.'
 }
 
 $remoteCliText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Open-VastRemoteCli.ps1') -Raw -Encoding UTF8

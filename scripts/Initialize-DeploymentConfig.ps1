@@ -67,6 +67,10 @@ $config = if ($configExists) {
 } else {
     Get-DeployConfig -ConfigPath 'config.psd1'
 }
+$templateConfig = Get-DeployConfig -ConfigPath 'config.psd1'
+if ($configExists) {
+    $config = Add-CurrentFeatureConfigurationDefaults -Config $config -Template $templateConfig
+}
 $defaultApplicationType = if ([string]$config.Application.DefaultType -eq 'webui') { 'WebUI' } else { 'ComfyUI' }
 $defaultGpuNames = $recommendedGpus
 

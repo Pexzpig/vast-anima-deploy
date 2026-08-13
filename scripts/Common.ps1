@@ -98,6 +98,40 @@ function Set-DeploymentSearchPreferences {
     return $Config
 }
 
+function Add-CurrentFeatureConfigurationDefaults {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [Parameter(Mandatory = $true)][hashtable]$Template
+    )
+
+    # These are forward additions to the current single configuration schema.
+    # No obsolete selection files are read, and existing values always win.
+    foreach ($field in @(
+        'Commit', 'TorchVersion', 'TorchvisionVersion', 'TorchCudaVersion', 'TorchIndexUrl',
+        'Localization', 'Extensions'
+    )) {
+        if (-not $Config.WebUI.ContainsKey($field)) {
+            $Config.WebUI[$field] = ConvertTo-HashtableDeep -InputObject $Template.WebUI[$field]
+        }
+    }
+    if (-not $Config.Anima.ContainsKey('WorkflowSha256')) {
+        $oldDefaultWorkflowUrl = 'https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/image_anima_base_v1.json'
+        if ([string]$Config.Anima.WorkflowUrl -eq $oldDefaultWorkflowUrl -or
+            [string]$Config.Anima.WorkflowUrl -eq [string]$Template.Anima.WorkflowUrl) {
+            $Config.Anima.WorkflowUrl = [string]$Template.Anima.WorkflowUrl
+            $Config.Anima.WorkflowSha256 = [string]$Template.Anima.WorkflowSha256
+        } else {
+            # A custom workflow URL needs its own matching digest; do not attach
+            # the template digest to unrelated content.
+            $Config.Anima.WorkflowSha256 = ''
+        }
+    }
+    if (-not $Config.Anima.ContainsKey('ManagedWorkflowFileName')) {
+        $Config.Anima.ManagedWorkflowFileName = [string]$Template.Anima.ManagedWorkflowFileName
+    }
+    return $Config
+}
+
 function Assert-CommandExists {
     param([Parameter(Mandatory = $true)][string]$Name)
 
@@ -504,12 +538,97 @@ function Get-ObjectProperty {
     param($Object, [Parameter(Mandatory = $true)][string[]]$Names, $Default = $null)
 
     foreach ($name in $Names) {
-        if ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $name) {
+        $hasValue = $false
+        $value = $null
+        if ($Object -is [System.Collections.IDictionary] -and $Object.Contains($name)) {
+            $hasValue = $true
+            $value = $Object[$name]
+        } elseif ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $name) {
+            $hasValue = $true
             $value = $Object.$name
+        }
+        if ($hasValue) {
             if ($null -ne $value -and [string]$value -ne '') { return $value }
         }
     }
     return $Default
+}
+
+function Get-VastAccountInstances {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 30
+    )
+
+    $response = Invoke-VastJson -Config $Config -Arguments @('show', 'instances', '--raw') -TimeoutSeconds $TimeoutSeconds
+    if ($null -ne $response) {
+        $reportedError = (($response.PSObject.Properties.Name -contains 'error') -and [bool]$response.error) -or
+            (($response.PSObject.Properties.Name -contains 'success') -and -not [bool]$response.success)
+        if ($reportedError) {
+            throw "Vast API reported an error while listing instances: $($response | ConvertTo-Json -Depth 10 -Compress)"
+        }
+    }
+    return @(ConvertTo-ObjectArray -Value $response -CandidateProperties @('instances'))
+}
+
+function ConvertTo-VastInstanceChoiceRows {
+    param([Parameter(Mandatory = $true)][object[]]$Instances)
+
+    $rows = @()
+    for ($index = 0; $index -lt $Instances.Count; $index++) {
+        $instance = $Instances[$index]
+        $price = Get-ObjectProperty -Object $instance -Names @('dph_total', 'dph')
+        $rows += [pscustomobject]@{
+            choice = $index + 1
+            status = [string](Get-ObjectProperty -Object $instance -Names @('actual_status', 'status', 'cur_state') -Default 'unknown')
+            label = [string](Get-ObjectProperty -Object $instance -Names @('label') -Default 'unknown')
+            gpu = [string](Get-ObjectProperty -Object $instance -Names @('gpu_name', 'gpu') -Default 'unknown')
+            image = [string](Get-ObjectProperty -Object $instance -Names @('image_uuid', 'image', 'image_name') -Default 'unknown')
+            region = [string](Get-ObjectProperty -Object $instance -Names @('geolocation', 'location') -Default 'unknown')
+            ip = [string](Get-ObjectProperty -Object $instance -Names @('public_ipaddr', 'public_ip', 'ssh_host') -Default 'unknown')
+            price_USD_hour = if ($null -eq $price) { 'unknown' } else { Format-UsdPrice -Amount ([double]$price) }
+        }
+    }
+    return $rows
+}
+
+function Assert-AttachedInstanceState {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $required = @(
+        'schema_version', 'source', 'instance_id', 'label', 'application_type',
+        'deployment_image', 'service_name', 'listen_host', 'remote_port', 'local_port',
+        'application_root', 'ssh_host', 'ssh_port', 'verified_at'
+    )
+    $missing = @($required | Where-Object { -not (Test-ObjectProperty -Object $State -Name $_) })
+    if ($missing.Count -gt 0) { throw "Attached instance state is missing required field(s): $($missing -join ', ')." }
+    if ([int]$State.schema_version -ne 1 -or [string]$State.source -ne 'external_script_instance') {
+        throw 'Attached instance state has an unsupported schema or source.'
+    }
+    if ([string]$State.application_type -notin @('comfyui', 'webui')) { throw 'Attached instance state has an unsupported application type.' }
+    if ([int]$State.remote_port -lt 1 -or [int]$State.remote_port -gt 65535 -or
+        [int]$State.local_port -lt 1 -or [int]$State.local_port -gt 65535) {
+        throw 'Attached instance state contains an invalid application port.'
+    }
+    return $State
+}
+
+function Get-AttachedInstanceState {
+    $path = Resolve-ProjectPath -Path 'state/attached-instance.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try {
+        $state = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        return Assert-AttachedInstanceState -State $state
+    } catch {
+        throw "Attached instance state is invalid: $path. $($_.Exception.Message)"
+    }
+}
+
+function Save-AttachedInstanceState {
+    param([Parameter(Mandatory = $true)]$State)
+
+    Assert-AttachedInstanceState -State $State | Out-Null
+    return Save-JsonFile -Value $State -Path 'state/attached-instance.json'
 }
 
 function Get-DeploymentApplication {
@@ -658,6 +777,53 @@ function Set-DeploymentInstanceDestroyed {
     }
     Save-DeploymentState -Config $Config -State $State | Out-Null
     return $State
+}
+
+function Sync-DeploymentInstanceState {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$AccountInstances
+    )
+
+    $instanceId = Get-ObjectProperty -Object $State -Names @('instance_id')
+    $previousStatus = [string](Get-ObjectProperty -Object $State -Names @('instance_status') -Default '')
+    if ($null -eq $instanceId -or $previousStatus -eq 'destroyed') {
+        return [pscustomobject]@{
+            InstanceId = $instanceId
+            PreviousStatus = $previousStatus
+            CurrentStatus = $previousStatus
+            Saved = $false
+            Found = $false
+        }
+    }
+
+    $liveInstance = Find-VastInstanceInResponse -Response $AccountInstances -InstanceId ([int64]$instanceId)
+    if ($null -eq $liveInstance) {
+        $currentStatus = 'destroyed'
+        $State.instance_status = $currentStatus
+        if (-not (Get-ObjectProperty -Object $State -Names @('destroyed_at'))) {
+            $State.destroyed_at = (Get-Date).ToUniversalTime().ToString('o')
+        }
+    } else {
+        $currentStatus = [string](Get-ObjectProperty -Object $liveInstance -Names @('actual_status', 'status', 'cur_state') -Default 'unknown')
+        if ([string]::IsNullOrWhiteSpace($currentStatus) -or $currentStatus -eq 'unknown') {
+            $currentStatus = $previousStatus
+        } else {
+            $State.instance_status = $currentStatus
+        }
+    }
+
+    # Persist exactly once for this startup reconciliation, even when the
+    # reported status is unchanged, so updated_at records the account check.
+    Save-DeploymentState -Config $Config -State $State | Out-Null
+    return [pscustomobject]@{
+        InstanceId = [int64]$instanceId
+        PreviousStatus = $previousStatus
+        CurrentStatus = $currentStatus
+        Saved = $true
+        Found = ($null -ne $liveInstance)
+    }
 }
 
 function Test-DeploymentStateHasActiveResources {

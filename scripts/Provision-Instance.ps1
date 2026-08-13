@@ -23,6 +23,7 @@ Wait-VastSshReady -Config $config -Endpoint $endpoint
 Write-Host '[local 2/5] Generating the remote deployment configuration...' -ForegroundColor Cyan
 $remoteConfig = [ordered]@{
     schema_version = 2
+    deployment_image = $deploymentImage
     application = [ordered]@{
         type = $application.Type
     }
@@ -41,6 +42,7 @@ $remoteConfig = [ordered]@{
         python = [string]$config.ComfyUI.Python
         listen_host = [string]$config.ComfyUI.ListenHost
         port = [int]$config.ComfyUI.Port
+        local_port = [int]$config.ComfyUI.LocalPort
         service_name = [string]$config.ComfyUI.ServiceName
         log_path = [string]$config.ComfyUI.LogPath
         extra_args = @($config.ComfyUI.ExtraArgs)
@@ -48,21 +50,31 @@ $remoteConfig = [ordered]@{
     webui = [ordered]@{
         repository = [string]$config.WebUI.Repository
         ref = [string]$config.WebUI.Ref
+        commit = [string]$config.WebUI.Commit
         root = [string]$config.WebUI.Root
         venv = [string]$config.WebUI.Venv
         python = [string]$config.WebUI.Python
         python_version = [string]$config.WebUI.PythonVersion
+        torch_version = [string]$config.WebUI.TorchVersion
+        torchvision_version = [string]$config.WebUI.TorchvisionVersion
+        torch_cuda_version = [string]$config.WebUI.TorchCudaVersion
+        torch_index_url = [string]$config.WebUI.TorchIndexUrl
         listen_host = [string]$config.WebUI.ListenHost
         port = [int]$config.WebUI.Port
+        local_port = [int]$config.WebUI.LocalPort
         service_name = [string]$config.WebUI.ServiceName
         log_path = [string]$config.WebUI.LogPath
         model_root = [string]$config.WebUI.ModelRoot
         extra_args = @($config.WebUI.ExtraArgs)
+        localization = [string]$config.WebUI.Localization
+        extensions = @($config.WebUI.Extensions)
     }
     anima = [ordered]@{
         variant = [string]$config.Anima.Variant
         workflow_url = [string]$config.Anima.WorkflowUrl
+        workflow_sha256 = [string]$config.Anima.WorkflowSha256
         workflow_file_name = [string]$config.Anima.WorkflowFileName
+        managed_workflow_file_name = [string]$config.Anima.ManagedWorkflowFileName
         models = @($config.Anima.Models)
         baseline = $config.Anima.Baseline
     }
@@ -83,7 +95,8 @@ $remoteUploadDirectory = [string]$config.Local.RemoteUploadDirectory
 $provisionScriptPath = Resolve-ProjectPath -Path ([string]$config.Local.ProvisionScriptPath)
 $codexScriptPath = Resolve-ProjectPath -Path ([string]$config.Local.CodexScriptPath)
 $verifyScriptPath = Resolve-ProjectPath -Path 'remote/verify-deployment.sh'
-foreach ($requiredScript in @($provisionScriptPath, $codexScriptPath, $verifyScriptPath)) {
+$applicationConfigScriptPath = Resolve-ProjectPath -Path 'remote/configure-application.py'
+foreach ($requiredScript in @($provisionScriptPath, $codexScriptPath, $verifyScriptPath, $applicationConfigScriptPath)) {
     if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
         throw "Remote script not found: $requiredScript"
     }
@@ -105,6 +118,9 @@ Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
 Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $verifyScriptPath, "${target}:$remoteUploadDirectory/remote/verify-deployment.sh"
 )) -FailureMessage 'Uploading the remote verification script failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120 -Quiet
+Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
+    '-P', [string]$endpoint.Port, $applicationConfigScriptPath, "${target}:$remoteUploadDirectory/remote/configure-application.py"
+)) -FailureMessage 'Uploading the remote application configurator failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120 -Quiet
 Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $generatedConfig, "${target}:$remoteUploadDirectory/remote-config.json"
 )) -FailureMessage 'Uploading remote configuration failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120 -Quiet

@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Deploy', 'Search', 'Status', 'Tunnel', 'Provision', 'Start', 'Stop', 'Destroy', 'RemoveVolume', 'Configure', 'Test')]
+    [ValidateSet('Menu', 'Deploy', 'Search', 'Status', 'Tunnel', 'Provision', 'Start', 'Stop', 'Destroy', 'RemoveVolume', 'Configure', 'Test', 'ConnectExisting')]
     [string]$Action = 'Menu'
 )
 
@@ -32,6 +32,40 @@ function Update-DeploymentSshIdentity {
     $config.Vast.Ssh.IdentityFile = $PrivateKeyPath
     Save-JsonFile -Path $configPath -Value $config | Out-Null
     Write-Host "当前部署配置已绑定 SSH 私钥：$PrivateKeyPath" -ForegroundColor Green
+}
+
+function Sync-StartupAccountInstances {
+    param([Parameter(Mandatory = $true)][hashtable]$Config)
+
+    Write-Host ''
+    Write-Host '正在检查 Vast.ai 账户实例及状态...' -ForegroundColor Cyan
+    $instances = @(Get-VastAccountInstances -Config $Config -TimeoutSeconds 30)
+    $statusSummary = if ($instances.Count -eq 0) {
+        '无活动实例'
+    } else {
+        @($instances |
+            Group-Object { [string](Get-ObjectProperty -Object $_ -Names @('actual_status', 'status', 'cur_state') -Default 'unknown') } |
+            Sort-Object Name |
+            ForEach-Object { '{0}={1}' -f $_.Name, $_.Count }) -join '，'
+    }
+    Write-Host "账户实例检查完成：$($instances.Count) 个（$statusSummary）。" -ForegroundColor DarkCyan
+
+    $statePath = Resolve-ProjectPath -Path ([string]$Config.Local.StatePath)
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        Write-Host '当前没有本地部署状态，不写入 deployment state。' -ForegroundColor DarkGray
+        return $instances
+    }
+
+    $state = Get-DeploymentState -Config $Config
+    $result = Sync-DeploymentInstanceState -Config $Config -State $state -AccountInstances $instances
+    if (-not $result.Saved) {
+        Write-Host '本地状态没有可对账的活动实例。' -ForegroundColor DarkGray
+    } elseif ($result.Found) {
+        Write-Host "实例 $($result.InstanceId) 状态已刷新：$($result.PreviousStatus) -> $($result.CurrentStatus)" -ForegroundColor Green
+    } else {
+        Write-Warning "实例 $($result.InstanceId) 已不在账户实例列表中，本地状态已更新为 destroyed。"
+    }
+    return $instances
 }
 
 function Get-LocalDeploymentSummary {
@@ -100,12 +134,13 @@ function Show-MainMenu {
     Write-Host '  9. 检查配置'
     Write-Host ' 10. 销毁实例'
     Write-Host ' 11. 永久删除持久卷'
+    Write-Host ' 12. 连接账户已有脚本实例'
     Write-Host '  0. 退出'
 
     $mapping = @{
         '1' = 'Deploy'; '2' = 'Search'; '3' = 'Status'; '4' = 'Tunnel'
         '5' = 'Provision'; '6' = 'Start'; '7' = 'Stop'; '8' = 'Configure'
-        '9' = 'Test'; '10' = 'Destroy'; '11' = 'RemoveVolume'
+        '9' = 'Test'; '10' = 'Destroy'; '11' = 'RemoveVolume'; '12' = 'ConnectExisting'
         '0' = 'Exit'
     }
     while ($true) {
@@ -184,6 +219,9 @@ function Invoke-MainOperation {
             }
             & (Join-Path $scriptsRoot 'Remove-VastVolume.ps1') -ConfigPath $configPath -Force
         }
+        'ConnectExisting' {
+            & (Join-Path $scriptsRoot 'Connect-VastExistingInstance.ps1') -ConfigPath $configPath
+        }
         default { throw "未知操作：$Name" }
     }
 }
@@ -205,8 +243,10 @@ if ($firstRun) {
     Update-DeploymentSshIdentity -PrivateKeyPath $environmentStatus.SshPrivateKey
 }
 
+$config = Get-DeployConfig -ConfigPath $configPath
+$startupAccountInstances = @(Sync-StartupAccountInstances -Config $config)
+
 if ($Action -ne 'Menu') {
-    $config = Get-DeployConfig -ConfigPath $configPath
     Invoke-MainOperation -Name $Action -Config $config
     exit 0
 }

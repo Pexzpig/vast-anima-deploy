@@ -36,6 +36,53 @@ if ($updated.Codex.ProjectRoot -ne '/workspace/custom-project' -or
     throw 'Updating search preferences reset unrelated deployment configuration.'
 }
 
+$template = Get-DeployConfig -ConfigPath 'config.psd1'
+$forwardConfig = Get-DeployConfig -ConfigPath 'config.psd1'
+$forwardConfig.WebUI.Remove('Localization')
+$forwardConfig.WebUI.Remove('Extensions')
+$forwardConfig.WebUI.Remove('Commit')
+$forwardConfig.WebUI.Remove('TorchVersion')
+$forwardConfig.WebUI.Remove('TorchvisionVersion')
+$forwardConfig.WebUI.Remove('TorchCudaVersion')
+$forwardConfig.WebUI.Remove('TorchIndexUrl')
+$forwardConfig.Anima.Remove('WorkflowSha256')
+$forwardConfig.Anima.Remove('ManagedWorkflowFileName')
+$forwardConfig.Anima.WorkflowUrl = 'https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/image_anima_base_v1.json'
+$forwardConfig.Codex.ProjectRoot = '/workspace/preserved-forward-config'
+$forwardConfig = Add-CurrentFeatureConfigurationDefaults -Config $forwardConfig -Template $template
+if ($forwardConfig.WebUI.Localization -ne 'zh_CN' -or @($forwardConfig.WebUI.Extensions).Count -ne 2 -or
+    $forwardConfig.WebUI.Commit -ne '6e8086edeaef473eb05b48b55518802fadf5bba1' -or
+    $forwardConfig.WebUI.TorchVersion -ne '2.11.0' -or
+    $forwardConfig.WebUI.TorchvisionVersion -ne '0.26.0' -or
+    $forwardConfig.WebUI.TorchCudaVersion -ne '12.8' -or
+    $forwardConfig.WebUI.TorchIndexUrl -ne 'https://download.pytorch.org/whl/cu128' -or
+    [string]$forwardConfig.Anima.WorkflowSha256 -ne [string]$template.Anima.WorkflowSha256 -or
+    [string]$forwardConfig.Anima.WorkflowUrl -ne [string]$template.Anima.WorkflowUrl -or
+    $forwardConfig.Anima.ManagedWorkflowFileName -ne 'image_anima_base_v1.managed.json' -or
+    $forwardConfig.Codex.ProjectRoot -ne '/workspace/preserved-forward-config') {
+    throw 'Forward configuration defaults were not added without resetting custom values.'
+}
+$customWorkflowConfig = Get-DeployConfig -ConfigPath 'config.psd1'
+$customWorkflowConfig.Anima.Remove('WorkflowSha256')
+$customWorkflowConfig.Anima.WorkflowUrl = 'https://raw.githubusercontent.com/example/custom/1234567890123456789012345678901234567890/workflow.json'
+$customWorkflowConfig = Add-CurrentFeatureConfigurationDefaults -Config $customWorkflowConfig -Template $template
+if ($customWorkflowConfig.Anima.WorkflowUrl -notmatch '/example/custom/' -or $customWorkflowConfig.Anima.WorkflowSha256 -ne '') {
+    throw 'A custom workflow URL was overwritten or assigned an unrelated template digest.'
+}
+$customCommit = ('a' * 40) -join ''
+$customWorkflowSha = ('b' * 64) -join ''
+$forwardConfig.WebUI.Extensions = @(@{ Name = 'custom-managed-extension'; Repository = 'https://example.invalid/custom.git'; Commit = $customCommit; Enabled = $true })
+$forwardConfig.WebUI.TorchVersion = '9.9.9'
+$forwardConfig.WebUI.TorchIndexUrl = 'https://example.invalid/custom-wheels'
+$forwardConfig.Anima.WorkflowSha256 = $customWorkflowSha
+$forwardConfig = Add-CurrentFeatureConfigurationDefaults -Config $forwardConfig -Template $template
+if (@($forwardConfig.WebUI.Extensions).Count -ne 1 -or $forwardConfig.WebUI.Extensions[0].Name -ne 'custom-managed-extension' -or
+    $forwardConfig.WebUI.TorchVersion -ne '9.9.9' -or
+    $forwardConfig.WebUI.TorchIndexUrl -ne 'https://example.invalid/custom-wheels' -or
+    $forwardConfig.Anima.WorkflowSha256 -ne $customWorkflowSha) {
+    throw 'Existing workflow or extension feature settings were overwritten by defaults.'
+}
+
 $wizardText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\Initialize-DeploymentConfig.ps1') -Raw -Encoding UTF8
 if (-not $wizardText.Contains("Get-DeployConfig -ConfigPath `$resolvedConfigPath") -or
     $wizardText.Contains('launcher.json')) {

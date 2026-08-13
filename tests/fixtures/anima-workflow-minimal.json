@@ -1,0 +1,76 @@
+{
+  "nodes": [
+    {
+      "id": 90,
+      "type": "anima-subgraph",
+      "inputs": [
+        { "name": "width", "type": "INT", "link": 138 },
+        { "name": "height", "type": "INT", "link": 139 }
+      ],
+      "outputs": []
+    },
+    {
+      "id": 91,
+      "type": "ResolutionSelector",
+      "inputs": [],
+      "outputs": [
+        { "name": "width", "type": "INT", "links": [138] },
+        { "name": "height", "type": "INT", "links": [139] }
+      ],
+      "widgets_values": ["1:1 (Square)", 1, 16]
+    }
+  ],
+  "links": [
+    { "id": 138, "origin_id": 91, "origin_slot": 0, "target_id": 90, "target_slot": 0, "type": "INT" },
+    { "id": 139, "origin_id": 91, "origin_slot": 1, "target_id": 90, "target_slot": 1, "type": "INT" }
+  ],
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "anima-subgraph",
+        "name": "Text to Image (Anima Base v1.0)",
+        "nodes": [
+          { "id": 71, "type": "CLIPLoader", "title": "", "widgets_values": ["qwen_3_06b_base.safetensors", "stable_diffusion", "default"] },
+          { "id": 72, "type": "VAELoader", "title": "", "widgets_values": ["qwen_image_vae.safetensors"] },
+          { "id": 74, "type": "EmptyLatentImage", "title": "", "widgets_values": [1024, 1024, 1] },
+          { "id": 75, "type": "CLIPTextEncode", "title": "CLIP Text Encode (Negative Prompt)", "widgets_values": ["old negative"] },
+          { "id": 76, "type": "KSampler", "title": "", "widgets_values": [1, "randomize", 30, 4, "euler", "simple", 1] },
+          { "id": 77, "type": "CLIPTextEncode", "title": "CLIP Text Encode (Positive Prompt)", "widgets_values": ["old positive"] },
+          { "id": 78, "type": "UNETLoader", "title": "", "widgets_values": ["anima-base-v1.0.safetensors", "default"] },
+          { "id": 79, "type": "PrimitiveInt", "title": "Int (Steps)", "widgets_values": [30, "fixed"] },
+          { "id": 81, "type": "PrimitiveInt", "title": "Int (Steps)", "widgets_values": [8, "fixed"] },
+          {
+            "id": 85,
+            "type": "ComfySwitchNode",
+            "title": "",
+            "inputs": [
+              { "name": "on_false", "type": "INT", "link": 118 },
+              { "name": "on_true", "type": "INT", "link": 119 }
+            ],
+            "widgets_values": [false]
+          },
+          { "id": 86, "type": "PrimitiveFloat", "title": "Float (CFG)", "widgets_values": [4] },
+          {
+            "id": 87,
+            "type": "ComfySwitchNode",
+            "title": "",
+            "inputs": [
+              { "name": "on_false", "type": "FLOAT", "link": 120 },
+              { "name": "on_true", "type": "FLOAT", "link": 121 }
+            ],
+            "widgets_values": [false]
+          },
+          { "id": 88, "type": "PrimitiveFloat", "title": "Float (CFG)", "widgets_values": [1] },
+          { "id": 89, "type": "PrimitiveBoolean", "title": "", "widgets_values": [true] }
+        ],
+        "links": [
+          { "id": 118, "origin_id": 79, "origin_slot": 0, "target_id": 85, "target_slot": 0, "type": "INT" },
+          { "id": 119, "origin_id": 81, "origin_slot": 0, "target_id": 85, "target_slot": 1, "type": "INT" },
+          { "id": 120, "origin_id": 86, "origin_slot": 0, "target_id": 87, "target_slot": 0, "type": "FLOAT" },
+          { "id": 121, "origin_id": 88, "origin_slot": 0, "target_id": 87, "target_slot": 1, "type": "FLOAT" }
+        ]
+      }
+    ]
+  },
+  "version": 0.4
+}

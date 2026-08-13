@@ -74,10 +74,15 @@
     WebUI = @{
         Repository = 'https://github.com/Haoming02/sd-webui-forge-classic.git'
         Ref = 'neo'
+        Commit = '6e8086edeaef473eb05b48b55518802fadf5bba1'
         Root = '/workspace/sd-webui-forge-classic'
         Venv = '/workspace/venvs/webui'
         Python = '/workspace/venvs/webui/bin/python'
         PythonVersion = '3.13'
+        TorchVersion = '2.11.0'
+        TorchvisionVersion = '0.26.0'
+        TorchCudaVersion = '12.8'
+        TorchIndexUrl = 'https://download.pytorch.org/whl/cu128'
         ListenHost = '127.0.0.1'
         Port = 17860
         LocalPort = 27860
@@ -85,6 +90,21 @@
         LogPath = '/workspace/logs/webui.log'
         ModelRoot = '/workspace/sd-webui-forge-classic/models'
         ExtraArgs = @('--api', '--uv', '--skip-version-check')
+        Localization = 'zh_CN'
+        Extensions = @(
+            @{
+                Name = 'tag-autocomplete'
+                Repository = 'https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git'
+                Commit = '8766965a305b09aee4aa65aa754f84feaf801437'
+                Enabled = $true
+            },
+            @{
+                Name = 'stable-diffusion-webui-localization-zh_CN'
+                Repository = 'https://github.com/dtlnor/stable-diffusion-webui-localization-zh_CN.git'
+                Commit = '3b310d9c72c78264ab37d7651ab2638945e28dd8'
+                Enabled = $true
+            }
+        )
     }
 
     System = @{
@@ -93,8 +113,10 @@
 
     Anima = @{
         Variant = 'base-v1.0'
-        WorkflowUrl = 'https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/image_anima_base_v1.json'
+        WorkflowUrl = 'https://raw.githubusercontent.com/Comfy-Org/workflow_templates/12199d938df3c531853036116c145286790a7be7/templates/image_anima_base_v1.json'
+        WorkflowSha256 = 'f5d093bfb97409b5e3798394044baa8e775235335ffb881f0de0bf09a470cfe2'
         WorkflowFileName = 'image_anima_base_v1.json'
+        ManagedWorkflowFileName = 'image_anima_base_v1.managed.json'
         Models = @(
             @{
                 Name = 'anima-base-v1.0.safetensors'

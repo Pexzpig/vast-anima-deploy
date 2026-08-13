@@ -77,6 +77,24 @@ try {
     Save-JsonFile -Value (New-ValidDeploymentState) -Path $stateTestPath | Out-Null
     $loadedState = Get-DeploymentState -Config @{ Local = @{ StatePath = $stateTestPath } }
     if ($loadedState.application_type -ne 'comfyui') { throw 'A valid current state could not be loaded.' }
+
+    $syncConfig = @{ Local = @{ StatePath = $stateTestPath } }
+    $syncResult = Sync-DeploymentInstanceState -Config $syncConfig -State $loadedState -AccountInstances @(
+        [pscustomobject]@{ id = 300; actual_status = 'stopped' }
+    )
+    $syncedState = Get-DeploymentState -Config $syncConfig
+    if (-not $syncResult.Saved -or -not $syncResult.Found -or
+        $syncResult.PreviousStatus -ne 'running' -or $syncResult.CurrentStatus -ne 'stopped' -or
+        $syncedState.instance_status -ne 'stopped') {
+        throw 'Startup reconciliation did not persist the live account instance status exactly once.'
+    }
+
+    $syncResult = Sync-DeploymentInstanceState -Config $syncConfig -State $syncedState -AccountInstances @()
+    $syncedState = Get-DeploymentState -Config $syncConfig
+    if (-not $syncResult.Saved -or $syncResult.Found -or $syncResult.CurrentStatus -ne 'destroyed' -or
+        $syncedState.instance_status -ne 'destroyed' -or -not $syncedState.destroyed_at) {
+        throw 'Startup reconciliation did not mark an absent tracked instance as destroyed.'
+    }
 } finally {
     Remove-Item -LiteralPath $stateTestDirectory -Recurse -Force
 }

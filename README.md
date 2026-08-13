@@ -20,14 +20,15 @@ cd E:\Documents\img1\vast-anima-deploy
 .\Start-VastAnima.ps1
 ```
 
-项目只使用一份用户配置和一份运行状态：
+项目只使用一份 canonical 用户配置和一份部署状态；跨环境连接另有可选的独立记录：
 
 ```text
 user-config/deployment.json   # 搜索、实例、应用、模型、SSH 和 Codex 配置
 state/deployment.json         # 当前实例/卷及部署进度
+state/attached-instance.json  # 可选的跨环境只读连接记录
 ```
 
-两者均被 Git 忽略。`config.psd1` 是首次初始化的模板，不是日常部署状态。
+这些 JSON 均被 Git 忽略。`config.psd1` 是首次初始化的模板，不是日常部署状态。附加实例记录与部署状态完全独立，不拥有远端资源生命周期权限。
 
 ## 首次初始化
 
@@ -40,6 +41,8 @@ state/deployment.json         # 当前实例/卷及部署进度
 5. 检查 Vast 账户公钥，必要时注册并再次验证；
 6. 运行四页参数向导并创建 `user-config/deployment.json`。
 
+环境检查后、执行菜单或指定 `-Action` 前，入口会调用一次 `vastai show instances --raw` 查询账户现有实例，并将本地 `state/deployment.json` 跟踪实例的实时状态写回 state；状态未变化时也会更新时间戳，以记录本次对账。远端实例已经不存在时，本地状态更新为 `destroyed`；没有本地部署状态时只查询账户，不创建 state。
+
 向导管理以下字段：
 
 - 默认应用；
@@ -47,7 +50,7 @@ state/deployment.json         # 当前实例/卷及部署进度
 - 实例每小时价格上限和搜索结果数量；
 - 是否允许创建持久卷及卷大小。
 
-以后使用菜单“修改搜索参数”时，会基于现有配置修改这些字段。Codex、端口、仓库、模型、SSH 和远端路径等其他自定义值不会被模板覆盖。
+以后使用菜单“修改搜索参数”时，会基于现有配置修改这些字段。Codex、端口、仓库、模型、SSH 和远端路径等其他自定义值不会被模板覆盖。版本新增的 WebUI 固定提交、PyTorch/CUDA 版本、扩展和工作流校验字段只在缺失时由模板补入；旧版默认的可变工作流 URL 会一并收敛到固定提交。自定义工作流 URL 不会被覆盖，但必须由用户填写与其内容匹配的 SHA-256 才能通过配置检查。
 
 ## 新建部署流程
 
@@ -56,7 +59,7 @@ state/deployment.json         # 当前实例/卷及部署进度
 1. 选择 `ComfyUI` 或 `Forge Classic WebUI`；
 2. 选择独立持久卷或仅使用实例磁盘；
 3. 使用当前配置实时搜索 Vast GPU 报价；
-4. 显示型号、显存、可靠度、下载速度、机器 ID 和实例时价，由用户选择报价；
+4. 显示型号、显存、可靠度、下载速度、IP、地区和实例时价，由用户选择报价；
 5. 持久卷模式额外检查所选物理机器上的卷报价；
 6. 显示实例价格、卷月价和估算合计时价；
 7. 只有准确输入 `RENT` 才写入初始 state 并创建付费资源；
@@ -86,7 +89,7 @@ state/deployment.json         # 当前实例/卷及部署进度
 4. 检出并准备所选应用；
 5. 验证应用 Python/GPU 环境；
 6. 下载并校验 Anima 模型；
-7. 安装 workflow 或基线配置；
+7. 根据基线参数生成 ComfyUI 托管 workflow，或安装并配置 WebUI 扩展；
 8. 配置 Supervisor 服务和重启恢复；
 9. 等待应用健康接口；
 10. 安装并配置 Codex CLI；
@@ -98,7 +101,7 @@ state/deployment.json         # 当前实例/卷及部署进度
 - Git checkout 与固定 ref 一致；
 - 应用 Python 环境可以访问 GPU；
 - 三个 Anima 模型存在且 SHA-256 正确；
-- ComfyUI workflow 或 WebUI 基线记录存在；
+- ComfyUI 原始 workflow 哈希及托管 workflow 参数正确，或 WebUI 扩展提交与中文配置正确；
 - Supervisor 服务为 `RUNNING`；
 - 应用 HTTP 健康接口可访问；
 - Codex CLI、项目配置和登录辅助脚本存在。
@@ -113,7 +116,10 @@ ComfyUI：
 远端监听：127.0.0.1:18188
 本地地址：http://127.0.0.1:28188
 固定版本：v0.28.0
+托管工作流：image_anima_base_v1.managed.json
 ```
+
+官方 Anima 工作流固定到提交 `12199d938df3c531853036116c145286790a7be7`。部署保留原始文件，再根据 `Anima.Baseline` 写入宽高、提示词、固定 seed、steps、CFG、sampler 和 scheduler。托管副本使用基础模式，不启用 Turbo LoRA；重复 provision 会按当前配置重新生成。
 
 Forge Classic WebUI：
 
@@ -122,10 +128,39 @@ Forge Classic WebUI：
 虚拟环境：/workspace/venvs/webui
 远端监听：127.0.0.1:17860
 本地地址：http://127.0.0.1:27860
-仓库/分支：Haoming02/sd-webui-forge-classic / neo
+仓库/来源分支：Haoming02/sd-webui-forge-classic / neo
+固定发布提交：6e8086edeaef473eb05b48b55518802fadf5bba1（2.24）
+Python：3.13
+PyTorch：2.11.0 + CUDA 12.8
+Torchvision：0.26.0
 ```
 
+WebUI 首次启动前自动安装以下固定扩展：
+
+- Tag Autocomplete：`8766965a305b09aee4aa65aa754f84feaf801437`；
+- 简体中文本地化：`3b310d9c72c78264ab37d7651ab2638945e28dd8`。
+
+全新安装时，脚本先让 Forge 创建带当前 `VERSION_UID` 的 `config.json`，随后合并语言和扩展设置并自动重启一次，避免被 Forge 误判为旧版配置。后续 provision 直接合并现有配置：保留其他设置，将语言设为 `zh_CN`，并确保两个托管扩展未被禁用。用户自行安装的其他扩展不会被删除。若早期脚本已经生成了缺少版本标记的最小配置，重试时会先将其备份到 `/workspace/anima-project/records/` 再自动恢复部署。
+
+WebUI 主仓库不会跟随 `neo` 滚动更新。每次 provision 都强制检出上述固定提交，并在启动前校验受管 venv 的 Python、Torch、Torchvision、CUDA runtime 和 GPU 可用性；不匹配时只重建 `/workspace/venvs/webui`，不会删除模型、输出或用户扩展。Supervisor 启动脚本同时固定 `TORCH_COMMAND` 到官方 cu128 wheel index，防止 Forge 自行换回 CUDA 13 构建。
+
 主菜单选择“打开应用 SSH 隧道”，保持终端窗口打开，再访问对应本地地址。
+
+## 连接其他环境创建的实例
+
+主菜单选择“连接账户已有脚本实例”，或运行：
+
+```powershell
+.\Start-VastAnima.ps1 -Action ConnectExisting
+.\scripts\Connect-VastExistingInstance.ps1 -Mode Shell
+.\scripts\Connect-VastExistingInstance.ps1 -Mode Tunnel
+```
+
+该流程查询当前 Vast 登录账户，只显示标签与 `Vast.Instance.Label` 一致的实例；选择表显示状态、GPU、镜像、地区、IP 和价格，不显示实例 ID。选中后还必须通过 SSH 验证远端 `vast-anima-deploy` manifest；当前版本以前创建的实例则必须保留上传配置、应用记录和验证脚本，并现场通过完整健康验证。
+
+停止中的实例需要输入 `START` 才会启动并恢复 GPU 计费。如果本次启动后 SSH、密钥或远端标记验证失败，脚本会尝试把实例恢复为停止状态。当前机器必须持有实例接受的 SSH 私钥；Vast 账户相同并不代表新生成的私钥可以登录旧实例。
+
+验证成功后只写入 `state/attached-instance.json`，用于下次快速重连。附加实例仅支持 SSH/tmux 和应用隧道，不会进入本地 `deployment.json`，也不能通过该入口停止、provision、销毁或管理卷。本机自己的 canonical deployment 可以同时存在。
 
 ## 中断恢复与日常运维
 
@@ -154,6 +189,7 @@ Forge Classic WebUI：
 .\Start-VastAnima.ps1 -Action RemoveVolume
 .\Start-VastAnima.ps1 -Action Configure
 .\Start-VastAnima.ps1 -Action Test
+.\Start-VastAnima.ps1 -Action ConnectExisting
 ```
 
 打开远端交互式 shell：
@@ -200,4 +236,6 @@ Get-ChildItem .\tests\Test-*.ps1 | ForEach-Object {
 - [Vast.ai PyTorch 镜像](https://hub.docker.com/r/vastai/pytorch/)
 - [Forge Classic WebUI](https://github.com/Haoming02/sd-webui-forge-classic)
 - [ComfyUI](https://github.com/Comfy-Org/ComfyUI)
-- [ComfyUI 官方 Anima workflow](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/image_anima_base_v1.json)
+- [ComfyUI 官方 Anima workflow](https://github.com/Comfy-Org/workflow_templates/blob/12199d938df3c531853036116c145286790a7be7/templates/image_anima_base_v1.json)
+- [SD WebUI Tag Autocomplete](https://github.com/DominikDoom/a1111-sd-webui-tagcomplete)
+- [SD WebUI 简体中文本地化](https://github.com/dtlnor/stable-diffusion-webui-localization-zh_CN)
