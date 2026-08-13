@@ -63,6 +63,11 @@
         Root = '/workspace/ComfyUI'
         Venv = '/workspace/venvs/comfyui'
         Python = '/workspace/venvs/comfyui/bin/python'
+        TorchVersion = '2.11.0'
+        TorchvisionVersion = '0.26.0'
+        TorchaudioVersion = '2.11.0'
+        TorchCudaVersion = '12.8'
+        TorchIndexUrl = 'https://download.pytorch.org/whl/cu128'
         ListenHost = '127.0.0.1'
         Port = 18188
         LocalPort = 28188
@@ -117,6 +122,27 @@
         WorkflowSha256 = 'f5d093bfb97409b5e3798394044baa8e775235335ffb881f0de0bf09a470cfe2'
         WorkflowFileName = 'image_anima_base_v1.json'
         ManagedWorkflowFileName = 'image_anima_base_v1.managed.json'
+        HiresWorkflowFileName = 'image_anima_base_v1.hires.managed.json'
+        Turbo = @{
+            Name = 'anima-turbo-lora-v0.2.safetensors'
+            Url = 'https://huggingface.co/circlestone-labs/Anima-Official-LoRAs/resolve/218b5466a07e8a79328dd8b73ff810706d73cb86/anima-turbo-lora-v0.2.safetensors'
+            Sha256 = '1b55e40bdb1d0e5a78cb498f245fccfdaae97823265db957d2aabdcf4cd3caf1'
+            Strength = 1.0
+            Steps = 8
+            Cfg = 1.0
+            EnabledByDefault = $false
+        }
+        ManagedLoRAs = @()
+        ManualLoRASlots = 2
+        Hires = @{
+            Scale = 1.5
+            UpscaleMethod = 'bislerp'
+            Steps = 20
+            Cfg = 4.5
+            Sampler = 'er_sde'
+            Scheduler = 'simple'
+            Denoise = 0.35
+        }
         Models = @(
             @{
                 Name = 'anima-base-v1.0.safetensors'

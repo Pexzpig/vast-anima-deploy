@@ -13,6 +13,8 @@ try {
     $original = Join-Path $temporaryRoot 'original.json'
     $managed = Join-Path $temporaryRoot 'managed.json'
     $installed = Join-Path $temporaryRoot 'installed.json'
+    $hiresManaged = Join-Path $temporaryRoot 'hires-managed.json'
+    $hiresInstalled = Join-Path $temporaryRoot 'hires-installed.json'
     $remoteConfigPath = Join-Path $temporaryRoot 'remote-config.json'
     Copy-Item -LiteralPath $fixture -Destination $original
     $originalHash = (Get-FileHash -LiteralPath $original -Algorithm SHA256).Hash
@@ -29,6 +31,19 @@ try {
                 Sampler = 'er_sde'; Scheduler = 'simple'
                 PositivePrompt = 'configured positive'; NegativePrompt = 'configured negative'
             }
+            turbo = [ordered]@{
+                name = 'anima-turbo-lora-v0.2.safetensors'; strength = 1.0
+                steps = 8; cfg = 1.0; enabled_by_default = $false
+            }
+            managed_loras = @(
+                @{ Name = 'character-test.safetensors'; Kind = 'character'; Strength = 0.75; Enabled = $true }
+                @{ Name = 'disabled-style.safetensors'; Kind = 'style'; Strength = 1.0; Enabled = $false }
+            )
+            manual_lora_slots = 2
+            hires = [ordered]@{
+                scale = 1.5; upscale_method = 'bislerp'; steps = 20; cfg = 4.5
+                sampler = 'er_sde'; scheduler = 'simple'; denoise = 0.35
+            }
         }
         webui = [ordered]@{
             localization = 'zh_CN'
@@ -40,17 +55,19 @@ try {
     }
     Save-JsonFile -Value $remoteConfig -Path $remoteConfigPath | Out-Null
 
-    & python $configurator configure-workflow $remoteConfigPath $original $managed $installed
+    & python $configurator configure-workflow $remoteConfigPath $original $managed $installed $hiresManaged $hiresInstalled
     if ($LASTEXITCODE -ne 0) { throw 'configure-workflow failed.' }
-    & python $configurator verify-workflow $remoteConfigPath $original $managed $installed
+    & python $configurator verify-workflow $remoteConfigPath $original $managed $installed $hiresManaged $hiresInstalled
     if ($LASTEXITCODE -ne 0) { throw 'verify-workflow failed.' }
 
     if ((Get-FileHash -LiteralPath $original -Algorithm SHA256).Hash -ne $originalHash) {
         throw 'The original workflow was modified.'
     }
     $firstManagedHash = (Get-FileHash -LiteralPath $managed -Algorithm SHA256).Hash
-    & python $configurator configure-workflow $remoteConfigPath $original $managed $installed
-    if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $managed -Algorithm SHA256).Hash -ne $firstManagedHash) {
+    $firstHiresHash = (Get-FileHash -LiteralPath $hiresManaged -Algorithm SHA256).Hash
+    & python $configurator configure-workflow $remoteConfigPath $original $managed $installed $hiresManaged $hiresInstalled
+    if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $managed -Algorithm SHA256).Hash -ne $firstManagedHash -or
+        (Get-FileHash -LiteralPath $hiresManaged -Algorithm SHA256).Hash -ne $firstHiresHash) {
         throw 'Managed workflow generation is not idempotent.'
     }
 
@@ -65,18 +82,63 @@ try {
     $nodes = @($workflow.definitions.subgraphs[0].nodes)
     $latent = @($nodes | Where-Object type -eq 'EmptyLatentImage')[0]
     $sampler = @($nodes | Where-Object type -eq 'KSampler')[0]
-    $positive = @($nodes | Where-Object title -like '*Positive Prompt*')[0]
-    $negative = @($nodes | Where-Object title -like '*Negative Prompt*')[0]
+    $positive = @($nodes | Where-Object { $_.PSObject.Properties.Name -contains 'title' -and [string]$_.title -like '*Positive Prompt*' })[0]
+    $negative = @($nodes | Where-Object { $_.PSObject.Properties.Name -contains 'title' -and [string]$_.title -like '*Negative Prompt*' })[0]
     $baseSteps = @($nodes | Where-Object id -eq 79)[0]
+    $turboSteps = @($nodes | Where-Object id -eq 81)[0]
     $baseCfg = @($nodes | Where-Object id -eq 86)[0]
+    $turboCfg = @($nodes | Where-Object id -eq 88)[0]
     $turboSwitch = @($nodes | Where-Object type -eq 'PrimitiveBoolean')[0]
+    $loraLoaders = @($nodes | Where-Object type -eq 'LoraLoaderModelOnly')
+    $turboLoader = @($loraLoaders | Where-Object id -eq 83)[0]
+    $managedCharacter = @($loraLoaders | Where-Object { $_.PSObject.Properties.Name -contains 'title' -and [string]$_.title -eq 'Managed Character LoRA' })[0]
+    $manualCharacter = @($loraLoaders | Where-Object { $_.PSObject.Properties.Name -contains 'title' -and [string]$_.title -like 'Character LoRA*' })[0]
+    $manualStyle = @($loraLoaders | Where-Object { $_.PSObject.Properties.Name -contains 'title' -and [string]$_.title -like 'Style LoRA*' })[0]
     if ($latent.widgets_values[0] -ne 1280 -or $latent.widgets_values[1] -ne 768 -or
         $sampler.widgets_values[0] -ne 987654 -or $sampler.widgets_values[1] -ne 'fixed' -or
         $sampler.widgets_values[4] -ne 'er_sde' -or $sampler.widgets_values[5] -ne 'simple' -or
         $baseSteps.widgets_values[0] -ne 41 -or [double]$baseCfg.widgets_values[0] -ne 5.25 -or
+        $turboSteps.widgets_values[0] -ne 8 -or [double]$turboCfg.widgets_values[0] -ne 1.0 -or
         $positive.widgets_values[0] -ne 'configured positive' -or $negative.widgets_values[0] -ne 'configured negative' -or
-        [bool]$turboSwitch.widgets_values[0]) {
+        [bool]$turboSwitch.widgets_values[0] -or $turboLoader.widgets_values[0] -ne 'anima-turbo-lora-v0.2.safetensors' -or
+        [double]$turboLoader.widgets_values[1] -ne 1.0 -or $null -eq $managedCharacter -or
+        [double]$managedCharacter.widgets_values[1] -ne 0.75 -or $null -eq $manualCharacter -or $null -eq $manualStyle -or
+        [double]$manualCharacter.widgets_values[1] -ne 0 -or [double]$manualStyle.widgets_values[1] -ne 0 -or
+        @($loraLoaders | Where-Object { $_.PSObject.Properties.Name -contains 'title' -and [string]$_.title -like '*disabled*' }).Count -ne 0) {
         throw 'The managed workflow does not contain the configured base parameters.'
+    }
+    $standardInstance = @($workflow.nodes | Where-Object id -eq 90)[0]
+    $standardProxies = @($standardInstance.properties.proxyWidgets | ForEach-Object { "{0}:{1}" -f $_[0], $_[1] })
+    foreach ($expectedProxy in @(
+        "$($manualCharacter.id):lora_name", "$($manualCharacter.id):strength_model",
+        "$($manualStyle.id):lora_name", "$($manualStyle.id):strength_model"
+    )) {
+        if ($expectedProxy -notin $standardProxies) { throw "Manual LoRA proxy widget is missing: $expectedProxy" }
+    }
+
+    $hiresWorkflow = Get-Content -LiteralPath $hiresManaged -Raw -Encoding UTF8 | ConvertFrom-Json
+    $hiresNodes = @($hiresWorkflow.definitions.subgraphs[0].nodes)
+    $upscale = @($hiresNodes | Where-Object type -eq 'LatentUpscaleBy')[0]
+    $refiner = @($hiresNodes | Where-Object { $_.PSObject.Properties.Name -contains 'title' -and [string]$_.title -eq 'Base hires refinement (Turbo excluded)' })[0]
+    if ($null -eq $upscale -or $null -eq $refiner -or @($hiresNodes | Where-Object type -eq 'KSampler').Count -ne 2 -or
+        $upscale.widgets_values[0] -ne 'bislerp' -or [double]$upscale.widgets_values[1] -ne 1.5 -or
+        $refiner.widgets_values[2] -ne 20 -or [double]$refiner.widgets_values[3] -ne 4.5 -or
+        $refiner.widgets_values[4] -ne 'er_sde' -or $refiner.widgets_values[5] -ne 'simple' -or
+        [double]$refiner.widgets_values[6] -ne 0.35) {
+        throw 'The managed hires workflow does not contain the configured Base refinement stage.'
+    }
+    $refinerModelInput = @($refiner.inputs | Where-Object name -eq 'model')[0]
+    $refinerModelLink = @($hiresWorkflow.definitions.subgraphs[0].links | Where-Object id -eq $refinerModelInput.link)[0]
+    $refinerModelSource = @($hiresNodes | Where-Object id -eq $refinerModelLink.origin_id)[0]
+    if ($refinerModelSource.title -notlike 'Style LoRA*') {
+        throw 'The hires refinement does not use the non-Turbo model and complete optional LoRA chain.'
+    }
+    $hiresInstance = @($hiresWorkflow.nodes | Where-Object id -eq 90)[0]
+    $hiresProxies = @($hiresInstance.properties.proxyWidgets | ForEach-Object { "{0}:{1}" -f $_[0], $_[1] })
+    foreach ($expectedWidget in @('scale_by', 'steps', 'cfg', 'denoise')) {
+        if (-not @($hiresProxies | Where-Object { $_ -like "*:$expectedWidget" })) {
+            throw "Hires proxy widget is missing: $expectedWidget"
+        }
     }
 
     $webuiConfigPath = Join-Path $temporaryRoot 'webui-config.json'

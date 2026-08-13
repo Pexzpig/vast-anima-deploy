@@ -107,6 +107,13 @@ function Add-CurrentFeatureConfigurationDefaults {
     # These are forward additions to the current single configuration schema.
     # No obsolete selection files are read, and existing values always win.
     foreach ($field in @(
+        'TorchVersion', 'TorchvisionVersion', 'TorchaudioVersion', 'TorchCudaVersion', 'TorchIndexUrl'
+    )) {
+        if (-not $Config.ComfyUI.ContainsKey($field)) {
+            $Config.ComfyUI[$field] = ConvertTo-HashtableDeep -InputObject $Template.ComfyUI[$field]
+        }
+    }
+    foreach ($field in @(
         'Commit', 'TorchVersion', 'TorchvisionVersion', 'TorchCudaVersion', 'TorchIndexUrl',
         'Localization', 'Extensions'
     )) {
@@ -128,6 +135,22 @@ function Add-CurrentFeatureConfigurationDefaults {
     }
     if (-not $Config.Anima.ContainsKey('ManagedWorkflowFileName')) {
         $Config.Anima.ManagedWorkflowFileName = [string]$Template.Anima.ManagedWorkflowFileName
+    }
+    foreach ($field in @('HiresWorkflowFileName', 'ManagedLoRAs', 'ManualLoRASlots')) {
+        if (-not $Config.Anima.ContainsKey($field)) {
+            $Config.Anima[$field] = ConvertTo-HashtableDeep -InputObject $Template.Anima[$field]
+        }
+    }
+    foreach ($group in @('Turbo', 'Hires')) {
+        if (-not $Config.Anima.ContainsKey($group)) {
+            $Config.Anima[$group] = ConvertTo-HashtableDeep -InputObject $Template.Anima[$group]
+            continue
+        }
+        foreach ($field in $Template.Anima[$group].Keys) {
+            if (-not $Config.Anima[$group].ContainsKey($field)) {
+                $Config.Anima[$group][$field] = ConvertTo-HashtableDeep -InputObject $Template.Anima[$group][$field]
+            }
+        }
     }
     return $Config
 }

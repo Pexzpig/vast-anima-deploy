@@ -38,6 +38,11 @@ if ($updated.Codex.ProjectRoot -ne '/workspace/custom-project' -or
 
 $template = Get-DeployConfig -ConfigPath 'config.psd1'
 $forwardConfig = Get-DeployConfig -ConfigPath 'config.psd1'
+$forwardConfig.ComfyUI.Remove('TorchVersion')
+$forwardConfig.ComfyUI.Remove('TorchvisionVersion')
+$forwardConfig.ComfyUI.Remove('TorchaudioVersion')
+$forwardConfig.ComfyUI.Remove('TorchCudaVersion')
+$forwardConfig.ComfyUI.Remove('TorchIndexUrl')
 $forwardConfig.WebUI.Remove('Localization')
 $forwardConfig.WebUI.Remove('Extensions')
 $forwardConfig.WebUI.Remove('Commit')
@@ -47,10 +52,22 @@ $forwardConfig.WebUI.Remove('TorchCudaVersion')
 $forwardConfig.WebUI.Remove('TorchIndexUrl')
 $forwardConfig.Anima.Remove('WorkflowSha256')
 $forwardConfig.Anima.Remove('ManagedWorkflowFileName')
+$forwardConfig.Anima.Remove('HiresWorkflowFileName')
+$forwardConfig.Anima.Turbo.Remove('Sha256')
+$forwardConfig.Anima.Turbo.Strength = 0.9
+$forwardConfig.Anima.Remove('ManagedLoRAs')
+$forwardConfig.Anima.Remove('ManualLoRASlots')
+$forwardConfig.Anima.Hires.Remove('Denoise')
+$forwardConfig.Anima.Hires.Scale = 1.6
 $forwardConfig.Anima.WorkflowUrl = 'https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/image_anima_base_v1.json'
 $forwardConfig.Codex.ProjectRoot = '/workspace/preserved-forward-config'
 $forwardConfig = Add-CurrentFeatureConfigurationDefaults -Config $forwardConfig -Template $template
-if ($forwardConfig.WebUI.Localization -ne 'zh_CN' -or @($forwardConfig.WebUI.Extensions).Count -ne 2 -or
+if ($forwardConfig.ComfyUI.TorchVersion -ne '2.11.0' -or
+    $forwardConfig.ComfyUI.TorchvisionVersion -ne '0.26.0' -or
+    $forwardConfig.ComfyUI.TorchaudioVersion -ne '2.11.0' -or
+    $forwardConfig.ComfyUI.TorchCudaVersion -ne '12.8' -or
+    $forwardConfig.ComfyUI.TorchIndexUrl -ne 'https://download.pytorch.org/whl/cu128' -or
+    $forwardConfig.WebUI.Localization -ne 'zh_CN' -or @($forwardConfig.WebUI.Extensions).Count -ne 2 -or
     $forwardConfig.WebUI.Commit -ne '6e8086edeaef473eb05b48b55518802fadf5bba1' -or
     $forwardConfig.WebUI.TorchVersion -ne '2.11.0' -or
     $forwardConfig.WebUI.TorchvisionVersion -ne '0.26.0' -or
@@ -59,6 +76,15 @@ if ($forwardConfig.WebUI.Localization -ne 'zh_CN' -or @($forwardConfig.WebUI.Ext
     [string]$forwardConfig.Anima.WorkflowSha256 -ne [string]$template.Anima.WorkflowSha256 -or
     [string]$forwardConfig.Anima.WorkflowUrl -ne [string]$template.Anima.WorkflowUrl -or
     $forwardConfig.Anima.ManagedWorkflowFileName -ne 'image_anima_base_v1.managed.json' -or
+    $forwardConfig.Anima.HiresWorkflowFileName -ne 'image_anima_base_v1.hires.managed.json' -or
+    $forwardConfig.Anima.Turbo.Name -ne 'anima-turbo-lora-v0.2.safetensors' -or
+    [string]$forwardConfig.Anima.Turbo.Sha256 -ne [string]$template.Anima.Turbo.Sha256 -or
+    [double]$forwardConfig.Anima.Turbo.Strength -ne 0.9 -or
+    $forwardConfig.Anima.Turbo.EnabledByDefault -or
+    @($forwardConfig.Anima.ManagedLoRAs).Count -ne 0 -or
+    $forwardConfig.Anima.ManualLoRASlots -ne 2 -or
+    [double]$forwardConfig.Anima.Hires.Scale -ne 1.6 -or
+    [double]$forwardConfig.Anima.Hires.Denoise -ne 0.35 -or
     $forwardConfig.Codex.ProjectRoot -ne '/workspace/preserved-forward-config') {
     throw 'Forward configuration defaults were not added without resetting custom values.'
 }
@@ -72,14 +98,28 @@ if ($customWorkflowConfig.Anima.WorkflowUrl -notmatch '/example/custom/' -or $cu
 $customCommit = ('a' * 40) -join ''
 $customWorkflowSha = ('b' * 64) -join ''
 $forwardConfig.WebUI.Extensions = @(@{ Name = 'custom-managed-extension'; Repository = 'https://example.invalid/custom.git'; Commit = $customCommit; Enabled = $true })
+$forwardConfig.ComfyUI.TorchVersion = '8.8.8'
+$forwardConfig.ComfyUI.TorchIndexUrl = 'https://example.invalid/custom-comfy-wheels'
 $forwardConfig.WebUI.TorchVersion = '9.9.9'
 $forwardConfig.WebUI.TorchIndexUrl = 'https://example.invalid/custom-wheels'
 $forwardConfig.Anima.WorkflowSha256 = $customWorkflowSha
+$forwardConfig.Anima.Turbo.Strength = 0.8
+$forwardConfig.Anima.ManagedLoRAs = @(@{
+    Name = 'custom-character.safetensors'; Kind = 'character'; Url = 'https://example.invalid/character.safetensors'
+    Sha256 = ('c' * 64) -join ''; Strength = 0.7; Enabled = $true
+})
+$forwardConfig.Anima.Hires.Scale = 1.75
 $forwardConfig = Add-CurrentFeatureConfigurationDefaults -Config $forwardConfig -Template $template
 if (@($forwardConfig.WebUI.Extensions).Count -ne 1 -or $forwardConfig.WebUI.Extensions[0].Name -ne 'custom-managed-extension' -or
+    $forwardConfig.ComfyUI.TorchVersion -ne '8.8.8' -or
+    $forwardConfig.ComfyUI.TorchIndexUrl -ne 'https://example.invalid/custom-comfy-wheels' -or
     $forwardConfig.WebUI.TorchVersion -ne '9.9.9' -or
     $forwardConfig.WebUI.TorchIndexUrl -ne 'https://example.invalid/custom-wheels' -or
-    $forwardConfig.Anima.WorkflowSha256 -ne $customWorkflowSha) {
+    $forwardConfig.Anima.WorkflowSha256 -ne $customWorkflowSha -or
+    [double]$forwardConfig.Anima.Turbo.Strength -ne 0.8 -or
+    @($forwardConfig.Anima.ManagedLoRAs).Count -ne 1 -or
+    $forwardConfig.Anima.ManagedLoRAs[0].Name -ne 'custom-character.safetensors' -or
+    [double]$forwardConfig.Anima.Hires.Scale -ne 1.75) {
     throw 'Existing workflow or extension feature settings were overwritten by defaults.'
 }
 

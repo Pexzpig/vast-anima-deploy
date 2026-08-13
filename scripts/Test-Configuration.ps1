@@ -28,6 +28,27 @@ foreach ($applicationName in @('ComfyUI', 'WebUI')) {
 }
 if ([int]$config.ComfyUI.Port -eq [int]$config.WebUI.Port) { $errors.Add('ComfyUI and WebUI remote ports must be distinct.') }
 if ([int]$config.ComfyUI.LocalPort -eq [int]$config.WebUI.LocalPort) { $errors.Add('ComfyUI and WebUI local tunnel ports must be distinct.') }
+if ([string]$config.ComfyUI.Python -ne (([string]$config.ComfyUI.Venv).TrimEnd('/') + '/bin/python')) {
+    $errors.Add('ComfyUI.Python must be the Python executable inside ComfyUI.Venv.')
+}
+if ([string]$config.ComfyUI.TorchVersion -notmatch '^\d+\.\d+\.\d+$' -or
+    [string]$config.ComfyUI.TorchvisionVersion -notmatch '^\d+\.\d+\.\d+$' -or
+    [string]$config.ComfyUI.TorchaudioVersion -notmatch '^\d+\.\d+\.\d+$') {
+    $errors.Add('ComfyUI Torch, Torchvision, and Torchaudio versions must use major.minor.patch format.')
+}
+if ([string]$config.ComfyUI.TorchCudaVersion -notmatch '^\d+\.\d+$') {
+    $errors.Add('ComfyUI.TorchCudaVersion must use major.minor format.')
+}
+if ([string]$config.ComfyUI.TorchIndexUrl -notmatch '^https://download\.pytorch\.org/whl/cu\d+$') {
+    $errors.Add('ComfyUI.TorchIndexUrl must use the official HTTPS PyTorch CUDA wheel index.')
+}
+if ([string]$config.ComfyUI.TorchVersion -ne '2.11.0' -or
+    [string]$config.ComfyUI.TorchvisionVersion -ne '0.26.0' -or
+    [string]$config.ComfyUI.TorchaudioVersion -ne '2.11.0' -or
+    [string]$config.ComfyUI.TorchCudaVersion -ne '12.8' -or
+    [string]$config.ComfyUI.TorchIndexUrl -ne 'https://download.pytorch.org/whl/cu128') {
+    $errors.Add('ComfyUI must use the validated Torch 2.11.0 / Torchvision 0.26.0 / Torchaudio 2.11.0 / CUDA 12.8 wheel set.')
+}
 if ([string]$config.WebUI.Repository -ne 'https://github.com/Haoming02/sd-webui-forge-classic.git' -or [string]$config.WebUI.Ref -ne 'neo') {
     $errors.Add('WebUI must use the Haoming02 Forge Classic neo branch.')
 }
@@ -90,10 +111,54 @@ if (-not $config.Anima.ContainsKey('WorkflowSha256') -or [string]$config.Anima.W
 if ([string]$config.Anima.WorkflowUrl -notmatch '^https://raw\.githubusercontent\.com/[^/]+/[^/]+/[0-9a-fA-F]{40}/') {
     $errors.Add('Anima.WorkflowUrl must use raw.githubusercontent.com over HTTPS and pin a 40-character commit.')
 }
-foreach ($workflowName in @([string]$config.Anima.WorkflowFileName, [string]$config.Anima.ManagedWorkflowFileName)) {
+foreach ($workflowName in @(
+    [string]$config.Anima.WorkflowFileName,
+    [string]$config.Anima.ManagedWorkflowFileName,
+    [string]$config.Anima.HiresWorkflowFileName
+)) {
     if ($workflowName -notmatch '^[A-Za-z0-9._-]+\.json$') { $errors.Add("Unsafe Anima workflow filename: $workflowName") }
 }
-if ([string]$config.Anima.WorkflowFileName -eq [string]$config.Anima.ManagedWorkflowFileName) { $errors.Add('Original and managed workflow filenames must be distinct.') }
+$workflowNames = @(
+    [string]$config.Anima.WorkflowFileName,
+    [string]$config.Anima.ManagedWorkflowFileName,
+    [string]$config.Anima.HiresWorkflowFileName
+)
+if (@($workflowNames | Select-Object -Unique).Count -ne 3) { $errors.Add('Original, standard, and hires workflow filenames must be distinct.') }
+$turbo = $config.Anima.Turbo
+if (-not $turbo -or [string]$turbo.Name -ne 'anima-turbo-lora-v0.2.safetensors' -or
+    [string]$turbo.Url -ne 'https://huggingface.co/circlestone-labs/Anima-Official-LoRAs/resolve/218b5466a07e8a79328dd8b73ff810706d73cb86/anima-turbo-lora-v0.2.safetensors' -or
+    [string]$turbo.Sha256 -ne '1b55e40bdb1d0e5a78cb498f245fccfdaae97823265db957d2aabdcf4cd3caf1') {
+    $errors.Add('Anima.Turbo must use the pinned official Turbo LoRA v0.2 file, immutable URL, and SHA-256.')
+} else {
+    if ([double]$turbo.Strength -lt -2 -or [double]$turbo.Strength -gt 2) { $errors.Add('Anima.Turbo.Strength must be between -2.0 and 2.0.') }
+    if ([int]$turbo.Steps -lt 8 -or [int]$turbo.Steps -gt 12) { $errors.Add('Anima.Turbo.Steps must be between 8 and 12.') }
+    if ([double]$turbo.Cfg -ne 1.0) { $errors.Add('Anima.Turbo.Cfg must be 1.0.') }
+    if (-not $turbo.ContainsKey('EnabledByDefault') -or $turbo.EnabledByDefault -isnot [bool]) { $errors.Add('Anima.Turbo.EnabledByDefault must be a Boolean.') }
+}
+if ([int]$config.Anima.ManualLoRASlots -ne 2) { $errors.Add('Anima.ManualLoRASlots must provide the character and style slots (2).') }
+$managedLoRANames = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($lora in @($config.Anima.ManagedLoRAs)) {
+    $loraName = [string]$lora.Name
+    if ($loraName -notmatch '^[A-Za-z0-9._-]+\.safetensors$') { $errors.Add("Unsafe managed Anima LoRA filename: $loraName") }
+    if ([string]$lora.Kind -notin @('character', 'style')) { $errors.Add("Managed Anima LoRA '$loraName' Kind must be character or style.") }
+    if ([string]$lora.Url -notmatch '^https://') { $errors.Add("Managed Anima LoRA '$loraName' must use a public HTTPS URL.") }
+    if ([string]$lora.Sha256 -notmatch '^[0-9a-fA-F]{64}$') { $errors.Add("Managed Anima LoRA '$loraName' must provide a SHA-256 value.") }
+    if ([double]$lora.Strength -lt -2 -or [double]$lora.Strength -gt 2) { $errors.Add("Managed Anima LoRA '$loraName' strength must be between -2.0 and 2.0.") }
+    if (-not $lora.ContainsKey('Enabled') -or $lora.Enabled -isnot [bool]) { $errors.Add("Managed Anima LoRA '$loraName' Enabled flag must be a Boolean.") }
+    if (-not $managedLoRANames.Add($loraName) -or $loraName -eq [string]$turbo.Name) { $errors.Add("Duplicate managed Anima LoRA filename: $loraName") }
+}
+$hires = $config.Anima.Hires
+if (-not $hires) {
+    $errors.Add('Anima.Hires configuration is required.')
+} else {
+    if ([double]$hires.Scale -lt 1.0 -or [double]$hires.Scale -gt 2.0) { $errors.Add('Anima.Hires.Scale must be between 1.0 and 2.0.') }
+    if ([string]$hires.UpscaleMethod -notin @('nearest-exact', 'bilinear', 'area', 'bicubic', 'bislerp')) { $errors.Add('Anima.Hires.UpscaleMethod is unsupported by the pinned ComfyUI release.') }
+    if ([int]$hires.Steps -lt 1 -or [int]$hires.Steps -gt 200) { $errors.Add('Anima.Hires.Steps must be 1-200.') }
+    if ([double]$hires.Cfg -le 0 -or [double]$hires.Cfg -gt 30) { $errors.Add('Anima.Hires.Cfg must be greater than 0 and at most 30.') }
+    if ([double]$hires.Denoise -le 0 -or [double]$hires.Denoise -gt 1) { $errors.Add('Anima.Hires.Denoise must be greater than 0 and at most 1.') }
+    if ([string]$hires.Sampler -notmatch '^[A-Za-z0-9_+-]+$') { $errors.Add('Anima.Hires.Sampler contains unsupported characters.') }
+    if ([string]$hires.Scheduler -notmatch '^[A-Za-z0-9_+-]+$') { $errors.Add('Anima.Hires.Scheduler contains unsupported characters.') }
+}
 $baseline = $config.Anima.Baseline
 if ([int]$baseline.Width -lt 256 -or [int]$baseline.Width -gt 4096 -or [int]$baseline.Width % 16 -ne 0) { $errors.Add('Anima.Baseline.Width must be 256-4096 and divisible by 16.') }
 if ([int]$baseline.Height -lt 256 -or [int]$baseline.Height -gt 4096 -or [int]$baseline.Height % 16 -ne 0) { $errors.Add('Anima.Baseline.Height must be 256-4096 and divisible by 16.') }

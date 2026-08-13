@@ -27,6 +27,7 @@ if [[ "$application_type" == 'webui' ]]; then
   app_python=$(json_value '.webui.python')
   app_torch_version=$(json_value '.webui.torch_version')
   app_torchvision_version=$(json_value '.webui.torchvision_version')
+  app_torchaudio_version=''
   app_torch_cuda_version=$(json_value '.webui.torch_cuda_version')
   app_host=$(json_value '.webui.listen_host')
   app_port=$(json_value '.webui.port')
@@ -38,6 +39,10 @@ elif [[ "$application_type" == 'comfyui' ]]; then
   app_root=$(json_value '.comfyui.root')
   app_ref=$(json_value '.comfyui.ref')
   app_python=$(json_value '.comfyui.python')
+  app_torch_version=$(json_value '.comfyui.torch_version')
+  app_torchvision_version=$(json_value '.comfyui.torchvision_version')
+  app_torchaudio_version=$(json_value '.comfyui.torchaudio_version')
+  app_torch_cuda_version=$(json_value '.comfyui.torch_cuda_version')
   app_host=$(json_value '.comfyui.listen_host')
   app_port=$(json_value '.comfyui.port')
   service_name=$(json_value '.comfyui.service_name')
@@ -86,30 +91,28 @@ else
   fail "$application_name Git checkout at $app_root"
 fi
 
-if [[ "$application_type" == 'webui' ]]; then
-  application_python_check=$("$app_python" - "$app_torch_version" "$app_torchvision_version" "$app_torch_cuda_version" <<'PY' 2>&1 || true
+application_python_check=$("$app_python" - "$app_torch_version" "$app_torchvision_version" "$app_torchaudio_version" "$app_torch_cuda_version" <<'PY' 2>&1 || true
 import importlib.metadata
 import sys
 import torch
-expected_torch, expected_torchvision, expected_cuda = sys.argv[1:]
+expected_torch, expected_torchvision, expected_torchaudio, expected_cuda = sys.argv[1:]
 assert torch.__version__.split("+", 1)[0] == expected_torch
 assert importlib.metadata.version("torchvision").split("+", 1)[0] == expected_torchvision
+if expected_torchaudio:
+    assert importlib.metadata.version("torchaudio").split("+", 1)[0] == expected_torchaudio
 assert torch.version.cuda == expected_cuda
 assert torch.cuda.is_available()
-print(f"torch={torch.__version__}, torchvision={importlib.metadata.version('torchvision')}, cuda={torch.version.cuda}, gpu={torch.cuda.get_device_name(0)}")
+summary = f"torch={torch.__version__}, torchvision={importlib.metadata.version('torchvision')}"
+if expected_torchaudio:
+    summary += f", torchaudio={importlib.metadata.version('torchaudio')}"
+print(f"{summary}, cuda={torch.version.cuda}, gpu={torch.cuda.get_device_name(0)}")
 PY
-  )
-  if [[ "$application_python_check" == torch=* ]]; then
-    ok "$application_name Python environment ($application_python_check)"
-  else
-    fail "Pinned CUDA-enabled $application_name Python environment at $app_python"
-    [[ -z "$application_python_check" ]] || printf '  %s\n' "$application_python_check" >&2
-  fi
-elif [[ -x "$app_python" ]] && "$app_python" -c 'import torch; assert torch.cuda.is_available()' >/dev/null 2>&1; then
-  cuda_summary=$("$app_python" -c 'import torch; print(f"torch={torch.__version__}, cuda={torch.version.cuda}, gpu={torch.cuda.get_device_name(0)}")' 2>/dev/null || true)
-  ok "$application_name Python environment${cuda_summary:+ ($cuda_summary)}"
+)
+if [[ "$application_python_check" == torch=* ]]; then
+  ok "$application_name Python environment ($application_python_check)"
 else
-  fail "CUDA-enabled $application_name Python environment at $app_python"
+  fail "Pinned CUDA-enabled $application_name Python environment at $app_python"
+  [[ -z "$application_python_check" ]] || printf '  %s\n' "$application_python_check" >&2
 fi
 
 while IFS=$'\t' read -r model_name model_folder model_sha; do
@@ -127,18 +130,39 @@ done < <(jq -r --arg folder "$model_folder_key" '.anima.models[] | [.Name, .[$fo
 if [[ "$application_type" == 'comfyui' ]]; then
   workflow_name=$(json_value '.anima.workflow_file_name')
   managed_workflow_name=$(json_value '.anima.managed_workflow_file_name')
+  hires_workflow_name=$(json_value '.anima.hires_workflow_file_name')
   workflow_sha=$(json_value '.anima.workflow_sha256')
   workflow_original="$project_root/workflows/original/$workflow_name"
   workflow_managed="$project_root/workflows/$managed_workflow_name"
   workflow_installed="$app_root/user/default/workflows/$managed_workflow_name"
+  hires_workflow_managed="$project_root/workflows/$hires_workflow_name"
+  hires_workflow_installed="$app_root/user/default/workflows/$hires_workflow_name"
   if [[ -s "$workflow_original" ]] &&
     echo "$workflow_sha  $workflow_original" | sha256sum --check --status &&
     "$base_python" "$(dirname "$0")/configure-application.py" verify-workflow \
-      "$deploy_config" "$workflow_original" "$workflow_managed" "$workflow_installed"; then
-    ok "Pinned and configured workflow $workflow_installed"
+      "$deploy_config" "$workflow_original" "$workflow_managed" "$workflow_installed" \
+      "$hires_workflow_managed" "$hires_workflow_installed"; then
+    ok "Pinned and configured standard and hires workflows"
   else
-    fail "Pinned original and configured Anima workflow"
+    fail "Pinned original and configured Anima standard/hires workflows"
   fi
+
+  turbo_name=$(json_value '.anima.turbo.name')
+  turbo_sha=$(json_value '.anima.turbo.sha256')
+  turbo_path="$app_root/models/loras/$turbo_name"
+  if [[ -s "$turbo_path" ]] && echo "$turbo_sha  $turbo_path" | sha256sum --check --status; then
+    ok "Anima Turbo LoRA $turbo_name"
+  else
+    fail "Anima Turbo LoRA checksum $turbo_path"
+  fi
+  while IFS=$'\t' read -r lora_name lora_sha; do
+    lora_path="$app_root/models/loras/$lora_name"
+    if [[ -s "$lora_path" ]] && echo "$lora_sha  $lora_path" | sha256sum --check --status; then
+      ok "Managed Anima LoRA $lora_name"
+    else
+      fail "Managed Anima LoRA checksum $lora_path"
+    fi
+  done < <(jq -r '.anima.managed_loras[] | select(.Enabled == true) | [.Name, .Sha256] | @tsv' "$deploy_config")
 else
   webui_config="$app_root/config.json"
   localization=$(json_value '.webui.localization')

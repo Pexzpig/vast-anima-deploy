@@ -228,16 +228,71 @@ if [[ "$application_type" == 'comfyui' ]]; then
   app_root=$(json_required '.comfyui.root')
   app_venv=$(json_required '.comfyui.venv')
   app_python=$(json_required '.comfyui.python')
+  app_torch_version=$(json_required '.comfyui.torch_version')
+  app_torchvision_version=$(json_required '.comfyui.torchvision_version')
+  app_torchaudio_version=$(json_required '.comfyui.torchaudio_version')
+  app_torch_cuda_version=$(json_required '.comfyui.torch_cuda_version')
+  app_torch_index_url=$(json_required '.comfyui.torch_index_url')
   app_host=$(json_required '.comfyui.listen_host')
   app_port=$(json_required '.comfyui.port')
   service_name=$(json_required '.comfyui.service_name')
   log_path=$(json_required '.comfyui.log_path')
 
   checkout_repository "$app_repo" "$app_ref" "$app_root"
-  if [[ ! -x "$app_python" ]]; then
-    "$uv_bin" venv "$app_venv" --python "$base_python" --system-site-packages --seed
+  if [[ "$app_venv" != /workspace/venvs/* || "$app_venv" == '/workspace/venvs/' || "$app_python" != "$app_venv/bin/python" ]]; then
+    echo "Unsafe managed ComfyUI virtual environment path: $app_venv" >&2
+    exit 6
   fi
-  "$uv_bin" pip install --python "$app_python" -r "$app_root/requirements.txt"
+
+  comfyui_environment_matches() {
+    [[ -x "$app_python" ]] || return 1
+    "$app_python" - "$app_torch_version" "$app_torchvision_version" "$app_torchaudio_version" "$app_torch_cuda_version" <<'PY'
+import importlib.metadata
+import sys
+import torch
+
+expected_torch, expected_torchvision, expected_torchaudio, expected_cuda = sys.argv[1:]
+assert torch.__version__.split("+", 1)[0] == expected_torch
+assert importlib.metadata.version("torchvision").split("+", 1)[0] == expected_torchvision
+assert importlib.metadata.version("torchaudio").split("+", 1)[0] == expected_torchaudio
+assert torch.version.cuda == expected_cuda, f"torch CUDA {torch.version.cuda} != {expected_cuda}"
+assert torch.cuda.is_available(), "ComfyUI PyTorch cannot access the GPU"
+PY
+  }
+
+  comfyui_environment_ready=false
+  if comfyui_environment_matches >/dev/null 2>&1; then
+    comfyui_environment_ready=true
+    echo "Reusing validated managed ComfyUI environment: $app_venv"
+  elif [[ -e "$app_venv" ]]; then
+    echo "Rebuilding incompatible managed ComfyUI environment: $app_venv"
+    rm -rf -- "$app_venv"
+  fi
+  if [[ "$comfyui_environment_ready" != true ]]; then
+    "$uv_bin" venv "$app_venv" --python "$base_python" --seed
+    "$uv_bin" pip install --python "$app_python" --index-url "$app_torch_index_url" \
+      "torch==$app_torch_version" "torchvision==$app_torchvision_version" "torchaudio==$app_torchaudio_version"
+  fi
+
+  comfy_requirements="$app_root/requirements.txt"
+  comfy_managed_requirements="$project_root/records/comfyui-requirements-managed.txt"
+  comfy_pytorch_constraints="$project_root/records/comfyui-pytorch-constraints.txt"
+  for managed_package in torch torchvision torchaudio; do
+    if ! grep -Eq "^${managed_package}([[:space:]]*(#.*)?)?$" "$comfy_requirements"; then
+      echo "ComfyUI requirements no longer contain the expected unpinned package: $managed_package" >&2
+      exit 6
+    fi
+  done
+  awk '!/^(torch|torchvision|torchaudio)([[:space:]]*(#.*)?)?$/' \
+    "$comfy_requirements" > "$comfy_managed_requirements"
+  printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\n' \
+    "$app_torch_version" "$app_torchvision_version" "$app_torchaudio_version" > "$comfy_pytorch_constraints"
+  "$uv_bin" pip install --python "$app_python" \
+    --constraint "$comfy_pytorch_constraints" -r "$comfy_managed_requirements"
+  comfyui_environment_matches || {
+    echo "Pinned ComfyUI PyTorch environment failed validation after installing application requirements." >&2
+    exit 6
+  }
 else
   app_repo=$(json_required '.webui.repository')
   app_ref=$(json_required '.webui.commit')
@@ -318,9 +373,16 @@ fi
 stage 'Verifying the selected application Python environment'
 if [[ "$application_type" == 'comfyui' ]]; then
   "$app_python" - <<'PY'
+import importlib.metadata
 import torch
 assert torch.cuda.is_available(), 'application torch cannot access CUDA'
-print(f'ComfyUI environment: torch={torch.__version__}, cuda={torch.version.cuda}, gpu={torch.cuda.get_device_name(0)}')
+print(
+    'ComfyUI environment: '
+    f'torch={torch.__version__}, '
+    f'torchvision={importlib.metadata.version("torchvision")}, '
+    f'torchaudio={importlib.metadata.version("torchaudio")}, '
+    f'cuda={torch.version.cuda}, gpu={torch.cuda.get_device_name(0)}'
+)
 PY
 else
   "$app_python" - <<'PY'
@@ -340,6 +402,16 @@ while IFS=$'\t' read -r model_name comfy_folder webui_folder model_url model_sha
   fi
   download_file "$model_url" "$model_destination" "$model_sha"
 done < <(jq -r '.anima.models[] | [.Name, .ComfyFolder, .WebUiFolder, .Url, (.Sha256 // "")] | @tsv' "$deploy_config")
+if [[ "$application_type" == 'comfyui' ]]; then
+  lora_root="$app_root/models/loras"
+  turbo_name=$(json_required '.anima.turbo.name')
+  turbo_url=$(json_required '.anima.turbo.url')
+  turbo_sha=$(json_required '.anima.turbo.sha256')
+  download_file "$turbo_url" "$lora_root/$turbo_name" "$turbo_sha"
+  while IFS=$'\t' read -r lora_name lora_url lora_sha; do
+    download_file "$lora_url" "$lora_root/$lora_name" "$lora_sha"
+  done < <(jq -r '.anima.managed_loras[] | select(.Enabled == true) | [.Name, .Url, .Sha256] | @tsv' "$deploy_config")
+fi
 
 stage 'Installing application workflow or baseline configuration'
 mkdir -p "$project_root/workflows/original"
@@ -348,9 +420,12 @@ if [[ "$application_type" == 'comfyui' ]]; then
   workflow_url=$(json_required '.anima.workflow_url')
   workflow_sha=$(json_required '.anima.workflow_sha256')
   managed_workflow_name=$(json_required '.anima.managed_workflow_file_name')
+  hires_workflow_name=$(json_required '.anima.hires_workflow_file_name')
   workflow_original="$project_root/workflows/original/$workflow_name"
   workflow_managed="$project_root/workflows/$managed_workflow_name"
   workflow_installed="$app_root/user/default/workflows/$managed_workflow_name"
+  hires_workflow_managed="$project_root/workflows/$hires_workflow_name"
+  hires_workflow_installed="$app_root/user/default/workflows/$hires_workflow_name"
   if [[ -s "$workflow_original" ]] && ! echo "$workflow_sha  $workflow_original" | sha256sum --check --status; then
     workflow_backup="${workflow_original}.pre-pinned.$(date -u +%Y%m%dT%H%M%SZ)"
     mv "$workflow_original" "$workflow_backup"
@@ -359,7 +434,8 @@ if [[ "$application_type" == 'comfyui' ]]; then
   download_file "$workflow_url" "$workflow_original" "$workflow_sha"
   mkdir -p "$app_root/user/default/workflows"
   "$base_python" "$(dirname "$0")/configure-application.py" configure-workflow \
-    "$deploy_config" "$workflow_original" "$workflow_managed" "$workflow_installed"
+    "$deploy_config" "$workflow_original" "$workflow_managed" "$workflow_installed" \
+    "$hires_workflow_managed" "$hires_workflow_installed"
 else
   workflow_original='not used by Forge WebUI'
 fi

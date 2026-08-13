@@ -18,6 +18,14 @@ foreach ($expected in @(
     'Dpkg::Options::="--force-confold"',
     'pip install --upgrade uv',
     'if [[ "$application_type" == ''comfyui'' ]]',
+    '.comfyui.torch_index_url',
+    'Rebuilding incompatible managed ComfyUI environment',
+    'comfyui-requirements-managed.txt',
+    'comfyui-pytorch-constraints.txt',
+    'Pinned ComfyUI PyTorch environment failed validation after installing application requirements.',
+    '.anima.turbo.url',
+    '.anima.managed_loras[]',
+    'hires_workflow_managed',
     '.webui.repository',
     'models/Stable-diffusion',
     'models/text_encoder',
@@ -50,7 +58,7 @@ foreach ($expected in @(
     }
 }
 
-foreach ($expected in @('Base PyTorch environment', 'Forge Classic WebUI', 'ComfyUI', 'Pinned and configured workflow', 'WebUI localization', 'VERSION_UID', 'WebUI extension', 'Supervisor service', 'health endpoint', 'Codex CLI')) {
+foreach ($expected in @('Base PyTorch environment', 'Forge Classic WebUI', 'ComfyUI', 'standard and hires workflows', 'Anima Turbo LoRA', 'Managed Anima LoRA', 'WebUI localization', 'VERSION_UID', 'WebUI extension', 'Supervisor service', 'health endpoint', 'Codex CLI')) {
     if (-not $verifyScript.Contains($expected)) {
         throw "Remote verification is missing a required check: $expected"
     }
@@ -63,6 +71,11 @@ if (-not $localProvision.Contains('Uploading the remote verification script fail
     -not $localProvision.Contains("'-T', '-n'") -or
     -not $localProvision.Contains('configure-application.py') -or
     -not $localProvision.Contains('workflow_sha256') -or
+    -not $localProvision.Contains('hires_workflow_file_name = [string]$config.Anima.HiresWorkflowFileName') -or
+    -not $localProvision.Contains('managed_loras = @($config.Anima.ManagedLoRAs)') -or
+    -not $localProvision.Contains('enabled_by_default = [bool]$config.Anima.Turbo.EnabledByDefault') -or
+    -not $localProvision.Contains('torchaudio_version = [string]$config.ComfyUI.TorchaudioVersion') -or
+    -not $localProvision.Contains('torch_index_url = [string]$config.ComfyUI.TorchIndexUrl') -or
     -not $localProvision.Contains('commit = [string]$config.WebUI.Commit') -or
     -not $localProvision.Contains('torch_version = [string]$config.WebUI.TorchVersion') -or
     -not $localProvision.Contains('torchvision_version = [string]$config.WebUI.TorchvisionVersion') -or
@@ -72,7 +85,7 @@ if (-not $localProvision.Contains('Uploading the remote verification script fail
     -not $localProvision.Contains('-Quiet')) {
     throw 'Local provisioning does not upload verification or display staged progress.'
 }
-foreach ($expected in @('build_managed_workflow', 'ResolutionSelector', 'prepare-webui', 'configure-webui', 'disabled_extensions', 'disable_all_extensions', 'verify-workflow')) {
+foreach ($expected in @('build_standard_workflow', 'build_hires_workflow', 'configure_model_chain', 'LoraLoaderModelOnly', 'LatentUpscaleBy', 'Base hires refinement (Turbo excluded)', 'ResolutionSelector', 'prepare-webui', 'configure-webui', 'disabled_extensions', 'disable_all_extensions', 'verify-workflow')) {
     if (-not $applicationConfigurator.Contains($expected)) {
         throw "Remote application configurator is missing expected behavior: $expected"
     }
