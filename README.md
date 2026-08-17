@@ -65,7 +65,7 @@ Get-ChildItem -Recurse -File | Unblock-File
 8. 配置 Supervisor、等待应用健康接口，并安装 Codex CLI。
 9. 完成 GPU、模型、工作流或扩展、服务和健康接口检查后，将部署标记为完成。
 
-实例容器和 SSH 服务分别等待最多 15 分钟。SSH 阶段会持续读取 Vast 的 `actual_status`、`cur_state`、`next_state` 和 `status_msg`，并在同一行显示启动阶段、endpoint 和已等待时间；`loading` 或 endpoint 尚未生成时不会反复发起 SSH 连接。可通过 `Vast.Ssh.ReadyTimeoutSeconds` 和 `ReadyPollIntervalSeconds` 调整 SSH 阶段。
+实例容器和 SSH 服务分别等待最多 15 分钟。SSH 阶段会持续读取 Vast 的 `actual_status`、`cur_state`、`next_state` 和 `status_msg`，并在同一行显示启动阶段、endpoint 和已等待时间；`loading` 或 endpoint 尚未生成时不会反复发起 SSH 连接。启用 `DirectSsh` 时优先使用 `public_ipaddr` 和 `22/tcp` 映射端口，直连失败会立即尝试 Vast 的 `ssh_host`/`ssh_port` 代理。可通过 `Vast.Ssh.ReadyTimeoutSeconds` 和 `ReadyPollIntervalSeconds` 调整 SSH 阶段。
 
 若网络或 SSH 中断，可再次执行 `Deploy` 或 `Provision`。脚本会复用已经创建的卷、实例、Git 仓库、虚拟环境和模型下载临时文件，不会在已有活动资源时重复租用。
 

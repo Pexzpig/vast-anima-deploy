@@ -5,6 +5,9 @@ param()
 
 $config = @{
     Vast = @{
+        Instance = @{
+            DirectSsh = $true
+        }
         Ssh = @{
             User = 'root'
             IdentityFile = ''
@@ -79,6 +82,51 @@ if (-not @($script:statusMessages | Where-Object { $_ -match 'Vast=provisioning,
 if (($script:sshArguments[0] -join ' ') -notmatch 'old\.ssh\.example' -or
     ($script:sshArguments[1] -join ' ') -notmatch 'new\.ssh\.example') {
     throw 'SSH probes did not follow the endpoint reported by each Vast status response.'
+}
+
+$currentInstanceShape = [pscustomobject]@{
+    id = 47924385
+    actual_status = 'running'
+    intended_status = 'running'
+    cur_state = 'running'
+    next_state = 'running'
+    status_msg = 'success, running vastai/pytorch_cuda-12.8.1-auto/ssh'
+    ssh_host = 'ssh7.vast.ai'
+    ssh_port = 14384
+    public_ipaddr = '192.234.50.251'
+    ports = [pscustomobject]@{
+        '22/tcp' = @([pscustomobject]@{ HostIp = '0.0.0.0'; HostPort = '1375' })
+    }
+}
+$currentCandidates = @(Get-VastSshEndpointCandidatesFromInstance -Config $config -InstanceId 47924385 -Instance $currentInstanceShape)
+if ($currentCandidates.Count -ne 2 -or
+    $currentCandidates[0].ConnectionType -ne 'direct' -or $currentCandidates[0].Host -ne '192.234.50.251' -or $currentCandidates[0].Port -ne 1375 -or
+    $currentCandidates[1].ConnectionType -ne 'proxy' -or $currentCandidates[1].Host -ne 'ssh7.vast.ai' -or $currentCandidates[1].Port -ne 14384) {
+    throw 'DirectSsh did not order the current Vast direct mapping before the proxy endpoint.'
+}
+
+$script:instanceResponses = [System.Collections.Queue]::new()
+$script:instanceResponses.Enqueue([pscustomobject]@{ instances = $currentInstanceShape })
+$script:sshResults = [System.Collections.Queue]::new()
+$script:sshResults.Enqueue([pscustomobject]@{ ExitCode = 0; Text = 'SSH_READY'; Output = @('SSH_READY') })
+$script:sshArguments = @()
+$directEndpoint = Wait-VastSshReady -Config $config -InstanceId 47924385 -TimeoutSeconds 5 -PollIntervalSeconds 1
+if ($directEndpoint.ConnectionType -ne 'direct' -or $script:sshArguments.Count -ne 1 -or
+    ($script:sshArguments[0] -join ' ') -notmatch '192\.234\.50\.251') {
+    throw 'SSH readiness did not stop probing after the preferred direct endpoint succeeded.'
+}
+
+$script:instanceResponses = [System.Collections.Queue]::new()
+$script:instanceResponses.Enqueue([pscustomobject]@{ instances = $currentInstanceShape })
+$script:sshResults = [System.Collections.Queue]::new()
+$script:sshResults.Enqueue([pscustomobject]@{ ExitCode = 255; Text = 'kex_exchange_identification: Connection closed by remote host'; Output = @() })
+$script:sshResults.Enqueue([pscustomobject]@{ ExitCode = 0; Text = 'SSH_READY'; Output = @('SSH_READY') })
+$script:sshArguments = @()
+$proxyFallbackEndpoint = Wait-VastSshReady -Config $config -InstanceId 47924385 -TimeoutSeconds 5 -PollIntervalSeconds 1
+if ($proxyFallbackEndpoint.ConnectionType -ne 'proxy' -or $script:sshArguments.Count -ne 2 -or
+    ($script:sshArguments[0] -join ' ') -notmatch '192\.234\.50\.251' -or
+    ($script:sshArguments[1] -join ' ') -notmatch 'ssh7\.vast\.ai') {
+    throw 'SSH readiness did not probe the direct endpoint before falling back to the Vast proxy.'
 }
 
 $script:sshResults = [System.Collections.Queue]::new()
