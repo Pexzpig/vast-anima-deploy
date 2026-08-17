@@ -6,6 +6,7 @@ if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 
 $errors = New-Object System.Collections.Generic.List[string]
+if ([string]$config.Secrets.CivitaiTokenEnvironmentVariable -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { $errors.Add('Secrets.CivitaiTokenEnvironmentVariable is invalid.') }
 if (-not [string]$config.Vast.Search.Query) { $errors.Add('Vast.Search.Query is empty.') }
 if (-not [string]$config.Vast.Instance.Image) { $errors.Add('Vast.Instance.Image is empty.') }
 if ([string]$config.Vast.Instance.Image -notmatch '^vastai/pytorch:[A-Za-z0-9._-]+$') { $errors.Add('Vast.Instance.Image must use a pinned vastai/pytorch tag.') }
@@ -141,10 +142,43 @@ foreach ($lora in @($config.Anima.ManagedLoRAs)) {
     $loraName = [string]$lora.Name
     if ($loraName -notmatch '^[A-Za-z0-9._-]+\.safetensors$') { $errors.Add("Unsafe managed Anima LoRA filename: $loraName") }
     if ([string]$lora.Kind -notin @('character', 'style')) { $errors.Add("Managed Anima LoRA '$loraName' Kind must be character or style.") }
-    if ([string]$lora.Url -notmatch '^https://') { $errors.Add("Managed Anima LoRA '$loraName' must use a public HTTPS URL.") }
+    $downloadUri = $null
+    if (-not [Uri]::TryCreate([string]$lora.Url, [UriKind]::Absolute, [ref]$downloadUri) -or $downloadUri.Scheme -ne 'https') {
+        $errors.Add("Managed Anima LoRA '$loraName' must use a public HTTPS URL.")
+    } elseif ($downloadUri.UserInfo) {
+        $errors.Add("Managed Anima LoRA '$loraName' URL must not contain embedded credentials.")
+    }
     if ([string]$lora.Sha256 -notmatch '^[0-9a-fA-F]{64}$') { $errors.Add("Managed Anima LoRA '$loraName' must provide a SHA-256 value.") }
     if ([double]$lora.Strength -lt -2 -or [double]$lora.Strength -gt 2) { $errors.Add("Managed Anima LoRA '$loraName' strength must be between -2.0 and 2.0.") }
     if (-not $lora.ContainsKey('Enabled') -or $lora.Enabled -isnot [bool]) { $errors.Add("Managed Anima LoRA '$loraName' Enabled flag must be a Boolean.") }
+    if ([string]$lora.Source -notin @('civitai', 'direct')) { $errors.Add("Managed Anima LoRA '$loraName' Source must be civitai or direct.") }
+    if (-not $lora.ContainsKey('AutoApplyInComfyUI') -or $lora.AutoApplyInComfyUI -isnot [bool]) { $errors.Add("Managed Anima LoRA '$loraName' AutoApplyInComfyUI must be a Boolean.") }
+    if ([string]$lora.BaseModel -notmatch '(?i)\bAnima\b') { $errors.Add("Managed Anima LoRA '$loraName' must declare an Anima base model.") }
+    if ($lora.TriggerWords -is [string] -or $lora.TriggerWords -isnot [System.Collections.IEnumerable]) {
+        $errors.Add("Managed Anima LoRA '$loraName' TriggerWords must be an array.")
+    } else {
+        foreach ($triggerWord in @($lora.TriggerWords)) {
+            if (-not ($triggerWord -is [string]) -or [string]::IsNullOrWhiteSpace([string]$triggerWord) -or ([string]$triggerWord).Length -gt 200) {
+                $errors.Add("Managed Anima LoRA '$loraName' has an invalid trigger word.")
+            }
+        }
+    }
+    $sourcePageUri = $null
+    if ([string]$lora.SourcePageUrl) {
+        if (-not [Uri]::TryCreate([string]$lora.SourcePageUrl, [UriKind]::Absolute, [ref]$sourcePageUri) -or $sourcePageUri.Scheme -ne 'https') {
+            $errors.Add("Managed Anima LoRA '$loraName' SourcePageUrl must use HTTPS.")
+        } elseif ($sourcePageUri.UserInfo) {
+            $errors.Add("Managed Anima LoRA '$loraName' SourcePageUrl must not contain embedded credentials.")
+        }
+    }
+    if ([string]$lora.SourcePageUrl -match '(?i)(?:[?&#]|^)token=') { $errors.Add("Managed Anima LoRA '$loraName' SourcePageUrl must not contain an access token.") }
+    if ([string]$lora.Url -match '(?i)(?:[?&#]|^)token=') { $errors.Add("Managed Anima LoRA '$loraName' URL must not contain an access token.") }
+    if ([string]$lora.Source -eq 'civitai') {
+        if ($null -eq $downloadUri -or $downloadUri.Host -notin @('civitai.com', 'www.civitai.com')) { $errors.Add("Managed Civitai LoRA '$loraName' must use a civitai.com download URL.") }
+        if ($null -eq $sourcePageUri -or $sourcePageUri.Host -notin @('civitai.com', 'www.civitai.com')) { $errors.Add("Managed Civitai LoRA '$loraName' must use a civitai.com source page URL.") }
+        if ([int64]$lora.ModelVersionId -le 0) { $errors.Add("Managed Civitai LoRA '$loraName' requires a fixed ModelVersionId.") }
+        if ($null -ne $lora.ModelId -and [int64]$lora.ModelId -le 0) { $errors.Add("Managed Civitai LoRA '$loraName' has an invalid ModelId.") }
+    }
     if (-not $managedLoRANames.Add($loraName) -or $loraName -eq [string]$turbo.Name) { $errors.Add("Duplicate managed Anima LoRA filename: $loraName") }
 }
 $hires = $config.Anima.Hires

@@ -40,6 +40,7 @@ user-config/deployment.json
 .\Start-VastAnima.ps1 -Action Configure       # 修改搜索和部署选项
 .\Start-VastAnima.ps1 -Action Test            # 检查配置
 .\Start-VastAnima.ps1 -Action ConnectExisting # 连接其他环境创建的脚本实例
+.\Start-VastAnima.ps1 -Action ManageLoRA      # 管理 ComfyUI/WebUI 共用 LoRA 清单
 .\Start-VastAnima.ps1 -Action Destroy         # 永久销毁实例
 .\Start-VastAnima.ps1 -Action RemoveVolume    # 永久删除独立持久卷
 ```
@@ -98,10 +99,10 @@ LoRA 目录：/workspace/ComfyUI/models/loras
 
 角色和画风 LoRA 有两种用法：
 
-- 在 `Anima.ManagedLoRAs` 中配置公开 HTTPS 地址和 SHA-256，由部署脚本下载并按配置顺序应用。
+- 运行 `.\Start-VastAnima.ps1 -Action ManageLoRA`，添加 Civitai 页面、Civitai 固定版本下载地址或公开 HTTPS 直链。启用项会在每次 provision 时下载并校验，但菜单添加的条目默认不会自动影响生成。
 - 手动上传到 `/workspace/ComfyUI/models/loras`，然后在工作流顶部的角色或画风槽位选择文件并设置权重；两个槽位默认权重为 0。
 
-重新执行 provision 会重建托管工作流。需要长期保留的手工修改，应在 ComfyUI 中另存为个人工作流。第三方 LoRA 应确认兼容 Anima Base，并自行核对触发词及许可。Anima 模型的使用范围以其官方非商业模型许可证为准。
+高级用户可在配置中将条目的 `AutoApplyInComfyUI` 设为 `true`，使其按清单顺序写入标准和高清托管工作流。重新执行 provision 会重建托管工作流；需要长期保留的手工修改，应在 ComfyUI 中另存为个人工作流。第三方 LoRA 应确认兼容 Anima Base，并自行核对触发词及许可。Anima 模型的使用范围以其官方非商业模型许可证为准。
 
 ## Forge Classic WebUI
 
@@ -118,6 +119,43 @@ LoRA 目录：/workspace/ComfyUI/models/loras
 - 简体中文本地化。
 
 重新执行 provision 会校正这两个托管扩展和中文配置，但不会删除用户自行安装的其他扩展。
+
+LoRA 清单中的启用项会安装到 `/workspace/sd-webui-forge-classic/models/Lora`。刷新 Extra Networks 后点击 LoRA 卡片，将 `<lora:文件名:权重>` 加入提示词；脚本不会自动修改 WebUI 的默认提示词。
+
+## 管理与手动上传 LoRA
+
+打开交互式清单管理：
+
+```powershell
+.\Start-VastAnima.ps1 -Action ManageLoRA
+```
+
+Civitai 模型页面未指定版本时，脚本会列出版本供选择并固定具体版本，不会在以后自动切换到最新版。模型必须是 Anima LoRA，下载文件必须为 SafeTensor 且具有 SHA-256。普通 HTTPS 直链需要手动提供文件名和 SHA-256。
+
+需要登录的 Civitai 资源可在当前 PowerShell 进程中设置令牌，令牌输入不会显示在屏幕上：
+
+```powershell
+$secret = Read-Host 'Civitai API token' -AsSecureString
+$credential = New-Object System.Management.Automation.PSCredential('civitai', $secret)
+$env:CIVITAI_API_TOKEN = $credential.GetNetworkCredential().Password
+```
+
+令牌不会写入 `deployment.json`、state、下载 URL 或部署日志。关闭当前 PowerShell 后环境变量失效。修改清单不会启动实例或立即操作远端；实例运行时需执行 `Provision`。
+
+SSH/tmux 窗口是终端而不是文件管理器，不能直接拖拽上传 `.safetensors`；拖拽到 PowerShell 通常只会粘贴本地路径。先查看 SSH endpoint：
+
+```powershell
+.\Open-VastRemoteCli.ps1 -ShowOnly
+```
+
+再根据输出的主机、端口和私钥，用 `scp` 上传：
+
+```powershell
+scp -i C:\path\to\id_ed25519 -P 12345 D:\models\example.safetensors root@ssh.example:/workspace/ComfyUI/models/loras/
+scp -i C:\path\to\id_ed25519 -P 12345 D:\models\example.safetensors root@ssh.example:/workspace/sd-webui-forge-classic/models/Lora/
+```
+
+也可以使用 WinSCP 的 SFTP 模式连接同一 SSH endpoint。清单中停用或移除条目不会删除远端文件。
 
 ## 连接其他环境创建的实例
 

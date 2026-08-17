@@ -36,7 +36,8 @@ try {
                 steps = 8; cfg = 1.0; enabled_by_default = $false
             }
             managed_loras = @(
-                @{ Name = 'character-test.safetensors'; Kind = 'character'; Strength = 0.75; Enabled = $true }
+                @{ Name = 'character-test.safetensors'; Kind = 'character'; Strength = 0.75; Enabled = $true; AutoApplyInComfyUI = $true }
+                @{ Name = 'install-only-style.safetensors'; Kind = 'style'; Strength = 0.9; Enabled = $true; AutoApplyInComfyUI = $false }
                 @{ Name = 'disabled-style.safetensors'; Kind = 'style'; Strength = 1.0; Enabled = $false }
             )
             manual_lora_slots = 2
@@ -90,6 +91,7 @@ try {
     $turboCfg = @($nodes | Where-Object id -eq 88)[0]
     $turboSwitch = @($nodes | Where-Object type -eq 'PrimitiveBoolean')[0]
     $loraLoaders = @($nodes | Where-Object type -eq 'LoraLoaderModelOnly')
+    $workflowJson = $workflow | ConvertTo-Json -Depth 100 -Compress
     $turboLoader = @($loraLoaders | Where-Object id -eq 83)[0]
     $managedCharacter = @($loraLoaders | Where-Object { $_.PSObject.Properties.Name -contains 'title' -and [string]$_.title -eq 'Managed Character LoRA' })[0]
     $manualCharacter = @($loraLoaders | Where-Object { $_.PSObject.Properties.Name -contains 'title' -and [string]$_.title -like 'Character LoRA*' })[0]
@@ -104,6 +106,7 @@ try {
         [double]$turboLoader.widgets_values[1] -ne 1.0 -or $null -eq $managedCharacter -or
         [double]$managedCharacter.widgets_values[1] -ne 0.75 -or $null -eq $manualCharacter -or $null -eq $manualStyle -or
         [double]$manualCharacter.widgets_values[1] -ne 0 -or [double]$manualStyle.widgets_values[1] -ne 0 -or
+        $workflowJson.Contains('install-only-style.safetensors') -or
         @($loraLoaders | Where-Object { $_.PSObject.Properties.Name -contains 'title' -and [string]$_.title -like '*disabled*' }).Count -ne 0) {
         throw 'The managed workflow does not contain the configured base parameters.'
     }

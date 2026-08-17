@@ -50,6 +50,7 @@ $forwardConfig.WebUI.Remove('TorchVersion')
 $forwardConfig.WebUI.Remove('TorchvisionVersion')
 $forwardConfig.WebUI.Remove('TorchCudaVersion')
 $forwardConfig.WebUI.Remove('TorchIndexUrl')
+$forwardConfig.Secrets.Remove('CivitaiTokenEnvironmentVariable')
 $forwardConfig.Anima.Remove('WorkflowSha256')
 $forwardConfig.Anima.Remove('ManagedWorkflowFileName')
 $forwardConfig.Anima.Remove('HiresWorkflowFileName')
@@ -73,6 +74,7 @@ if ($forwardConfig.ComfyUI.TorchVersion -ne '2.11.0' -or
     $forwardConfig.WebUI.TorchvisionVersion -ne '0.26.0' -or
     $forwardConfig.WebUI.TorchCudaVersion -ne '12.8' -or
     $forwardConfig.WebUI.TorchIndexUrl -ne 'https://download.pytorch.org/whl/cu128' -or
+    $forwardConfig.Secrets.CivitaiTokenEnvironmentVariable -ne 'CIVITAI_API_TOKEN' -or
     [string]$forwardConfig.Anima.WorkflowSha256 -ne [string]$template.Anima.WorkflowSha256 -or
     [string]$forwardConfig.Anima.WorkflowUrl -ne [string]$template.Anima.WorkflowUrl -or
     $forwardConfig.Anima.ManagedWorkflowFileName -ne 'image_anima_base_v1.managed.json' -or
@@ -119,8 +121,27 @@ if (@($forwardConfig.WebUI.Extensions).Count -ne 1 -or $forwardConfig.WebUI.Exte
     [double]$forwardConfig.Anima.Turbo.Strength -ne 0.8 -or
     @($forwardConfig.Anima.ManagedLoRAs).Count -ne 1 -or
     $forwardConfig.Anima.ManagedLoRAs[0].Name -ne 'custom-character.safetensors' -or
+    $forwardConfig.Anima.ManagedLoRAs[0].Source -ne 'direct' -or
+    -not [bool]$forwardConfig.Anima.ManagedLoRAs[0].AutoApplyInComfyUI -or
+    $forwardConfig.Anima.ManagedLoRAs[0].BaseModel -notmatch 'Anima' -or
+    @($forwardConfig.Anima.ManagedLoRAs[0].TriggerWords).Count -ne 0 -or
     [double]$forwardConfig.Anima.Hires.Scale -ne 1.75) {
     throw 'Existing workflow or extension feature settings were overwritten by defaults.'
+}
+
+$existingCivitaiConfig = Get-DeployConfig -ConfigPath 'config.psd1'
+$existingCivitaiUrl = 'https://civitai.com/api/download/models/987654'
+$existingCivitaiConfig.Anima.ManagedLoRAs = @(@{
+    Name = 'existing-civitai.safetensors'; Kind = 'style'; Url = $existingCivitaiUrl
+    Sha256 = ('d' * 64) -join ''; Strength = 0.6; Enabled = $true
+})
+$existingCivitaiConfig = Add-CurrentFeatureConfigurationDefaults -Config $existingCivitaiConfig -Template $template
+$existingCivitaiEntry = $existingCivitaiConfig.Anima.ManagedLoRAs[0]
+if ($existingCivitaiEntry.Source -ne 'civitai' -or
+    $existingCivitaiEntry.SourcePageUrl -ne $existingCivitaiUrl -or
+    [int64]$existingCivitaiEntry.ModelVersionId -ne 987654 -or
+    -not [bool]$existingCivitaiEntry.AutoApplyInComfyUI) {
+    throw 'An existing Civitai entry was not upgraded without changing its installation or workflow behavior.'
 }
 
 $wizardText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\Initialize-DeploymentConfig.ps1') -Raw -Encoding UTF8

@@ -4,6 +4,9 @@ param()
 . (Join-Path $PSScriptRoot '..\scripts\Common.ps1')
 
 $config = Get-DeployConfig -ConfigPath 'config.psd1'
+if ([string]$config.Secrets.CivitaiTokenEnvironmentVariable -ne 'CIVITAI_API_TOKEN') {
+    throw 'The Civitai token environment variable is not configured safely.'
+}
 if ([string]$config.Vast.Instance.Image -ne 'vastai/pytorch:cuda-12.8.1-auto') {
     throw "Unexpected deployment image: $($config.Vast.Instance.Image)"
 }
@@ -71,6 +74,7 @@ foreach ($expected in @(
     "'10' = 'Destroy'",
     "'11' = 'RemoveVolume'",
     "'12' = 'ConnectExisting'",
+    "'13' = 'ManageLoRA'",
     'user-config\deployment.json'
 )) {
     if (-not $entryText.Contains($expected)) {

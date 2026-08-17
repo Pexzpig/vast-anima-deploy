@@ -3,7 +3,9 @@ param([string]$ConfigPath)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
-$config = Get-DeployConfig -ConfigPath $ConfigPath
+$config = Add-CurrentFeatureConfigurationDefaults `
+    -Config (Get-DeployConfig -ConfigPath $ConfigPath) `
+    -Template (Get-DeployConfig -ConfigPath 'config.psd1')
 $state = Get-DeploymentState -Config $config
 $application = Get-DeploymentApplication -Config $config -State $state
 $deploymentImage = [string]$state.deployment_image
@@ -13,6 +15,31 @@ if ($deploymentImage -ne [string]$config.Vast.Instance.Image -and $state.instanc
 
 Assert-CommandExists -Name 'ssh'
 Assert-CommandExists -Name 'scp'
+
+function New-RestrictedSecretFile {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $path = [System.IO.Path]::GetTempFileName()
+    try {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $security = New-Object System.Security.AccessControl.FileSecurity
+        $security.SetOwner($identity)
+        $security.SetAccessRuleProtection($true, $false)
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $identity,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        $security.AddAccessRule($rule)
+        Set-Acl -LiteralPath $path -AclObject $security
+        [System.IO.File]::WriteAllText($path, $Value + "`n", (New-Object System.Text.UTF8Encoding($false)))
+        return $path
+    } catch {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
 Write-Host '[local 1/5] Waiting for the Vast.ai instance and resolving its SSH endpoint...' -ForegroundColor Cyan
 Wait-VastInstanceRunning -Config $config -InstanceId $state.instance_id | Out-Null
 $endpoint = Get-VastSshEndpoint -Config $config -InstanceId $state.instance_id
@@ -154,7 +181,30 @@ Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
 Write-Host '[local 4/5] Running remote provisioning; model downloads can take a long time.' -ForegroundColor Cyan
 Write-Host 'Progress and downloaded sizes will be printed below. Interrupted downloads resume from .part files.' -ForegroundColor DarkCyan
 $remoteCommand = "bash '$remoteUploadDirectory/remote/provision.sh' '$remoteUploadDirectory/remote-config.json'"
+$localCivitaiSecret = $null
+$remoteCivitaiSecretUploaded = $false
 try {
+    $enabledCivitaiLoRAs = @($config.Anima.ManagedLoRAs | Where-Object { [bool]$_.Enabled -and [string]$_.Source -eq 'civitai' })
+    if ($enabledCivitaiLoRAs.Count -gt 0) {
+        $tokenEnvironmentVariable = [string]$config.Secrets.CivitaiTokenEnvironmentVariable
+        $civitaiToken = [Environment]::GetEnvironmentVariable($tokenEnvironmentVariable, 'Process')
+        if ($civitaiToken) {
+            if ($civitaiToken -notmatch '^[A-Za-z0-9._-]+$') { throw "$tokenEnvironmentVariable contains unsupported characters." }
+            try {
+                $localCivitaiSecret = New-RestrictedSecretFile -Value $civitaiToken
+            } finally {
+                $civitaiToken = $null
+            }
+            Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
+                '-P', [string]$endpoint.Port, $localCivitaiSecret, "${target}:$remoteUploadDirectory/.civitai-token.upload"
+            )) -FailureMessage 'Uploading the temporary Civitai credential failed.' -Attempts 3 -DelaySeconds 3 -TimeoutSeconds 60 -Quiet
+            $remoteCivitaiSecretUploaded = $true
+            Invoke-NativeCommandCheckedWithRetry -Command 'ssh' -Arguments ($automatedSshCommon + @(
+                '-T', '-n', '-p', [string]$endpoint.Port, $target,
+                "umask 077 && mv '$remoteUploadDirectory/.civitai-token.upload' '$remoteUploadDirectory/.civitai-token'"
+            )) -FailureMessage 'Securing the temporary Civitai credential failed.' -Attempts 3 -DelaySeconds 3 -TimeoutSeconds 60 -Quiet
+        }
+    }
     Invoke-NativeCommandChecked -Command 'ssh' -Arguments ($automatedSshCommon + @(
         '-T', '-n', '-p', [string]$endpoint.Port, $target, $remoteCommand
     )) -FailureMessage 'Remote provisioning failed.'
@@ -164,6 +214,19 @@ catch {
     $state.last_error = $_.Exception.Message
     Save-DeploymentState -Config $config -State $state | Out-Null
     throw
+}
+finally {
+    if ($localCivitaiSecret -and (Test-Path -LiteralPath $localCivitaiSecret)) {
+        Remove-Item -LiteralPath $localCivitaiSecret -Force -ErrorAction SilentlyContinue
+    }
+    if ($remoteCivitaiSecretUploaded) {
+        try {
+            Invoke-NativeCommandCapture -Command 'ssh' -Arguments ($automatedSshCommon + @(
+                '-T', '-n', '-p', [string]$endpoint.Port, $target,
+                "rm -f -- '$remoteUploadDirectory/.civitai-token' '$remoteUploadDirectory/.civitai-curl.conf' '$remoteUploadDirectory/.civitai-token.upload'"
+            )) -TimeoutSeconds 30 | Out-Null
+        } catch {}
+    }
 }
 
 Write-Host '[local 5/5] Remote verification passed; saving deployment state...' -ForegroundColor Cyan

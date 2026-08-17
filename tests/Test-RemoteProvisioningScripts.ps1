@@ -25,6 +25,11 @@ foreach ($expected in @(
     'Pinned ComfyUI PyTorch environment failed validation after installing application requirements.',
     '.anima.turbo.url',
     '.anima.managed_loras[]',
+    '.Source',
+    'models/Lora',
+    '.civitai-curl.conf',
+    'Authorization: Bearer',
+    'trap cleanup_secrets EXIT',
     'hires_workflow_managed',
     '.webui.repository',
     'models/Stable-diffusion',
@@ -73,6 +78,12 @@ if (-not $localProvision.Contains('Uploading the remote verification script fail
     -not $localProvision.Contains('workflow_sha256') -or
     -not $localProvision.Contains('hires_workflow_file_name = [string]$config.Anima.HiresWorkflowFileName') -or
     -not $localProvision.Contains('managed_loras = @($config.Anima.ManagedLoRAs)') -or
+    -not $localProvision.Contains('CivitaiTokenEnvironmentVariable') -or
+    -not $localProvision.Contains('New-RestrictedSecretFile') -or
+    -not $localProvision.Contains('Set-Acl -LiteralPath $path -AclObject $security') -or
+    $localProvision.Contains('[System.IO.File]::SetAccessControl') -or
+    -not $localProvision.Contains('.civitai-token.upload') -or
+    -not $localProvision.Contains('Remove-Item -LiteralPath $localCivitaiSecret') -or
     -not $localProvision.Contains('enabled_by_default = [bool]$config.Anima.Turbo.EnabledByDefault') -or
     -not $localProvision.Contains('torchaudio_version = [string]$config.ComfyUI.TorchaudioVersion') -or
     -not $localProvision.Contains('torch_index_url = [string]$config.ComfyUI.TorchIndexUrl') -or
@@ -84,6 +95,9 @@ if (-not $localProvision.Contains('Uploading the remote verification script fail
     -not $localProvision.Contains('extensions = @($config.WebUI.Extensions)') -or
     -not $localProvision.Contains('-Quiet')) {
     throw 'Local provisioning does not upload verification or display staged progress.'
+}
+if ($localProvision.Contains('?token=') -or $provisionScript.Contains('?token=')) {
+    throw 'A Civitai token is being placed in a persisted or logged URL.'
 }
 foreach ($expected in @('build_standard_workflow', 'build_hires_workflow', 'configure_model_chain', 'LoraLoaderModelOnly', 'LatentUpscaleBy', 'Base hires refinement (Turbo excluded)', 'ResolutionSelector', 'prepare-webui', 'configure-webui', 'disabled_extensions', 'disable_all_extensions', 'verify-workflow')) {
     if (-not $applicationConfigurator.Contains($expected)) {

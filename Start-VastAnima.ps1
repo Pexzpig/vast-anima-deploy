@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Menu', 'Deploy', 'Search', 'Status', 'Tunnel', 'Provision', 'Start', 'Stop', 'Destroy', 'RemoveVolume', 'Configure', 'Test', 'ConnectExisting')]
+    [ValidateSet('Menu', 'Deploy', 'Search', 'Status', 'Tunnel', 'Provision', 'Start', 'Stop', 'Destroy', 'RemoveVolume', 'Configure', 'Test', 'ConnectExisting', 'ManageLoRA')]
     [string]$Action = 'Menu'
 )
 
@@ -32,6 +32,19 @@ function Update-DeploymentSshIdentity {
     $config.Vast.Ssh.IdentityFile = $PrivateKeyPath
     Save-JsonFile -Path $configPath -Value $config | Out-Null
     Write-Host "当前部署配置已绑定 SSH 私钥：$PrivateKeyPath" -ForegroundColor Green
+}
+
+function Update-DeploymentFeatureDefaults {
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return }
+    $current = Get-DeployConfig -ConfigPath $configPath
+    $template = Get-DeployConfig -ConfigPath (Join-Path $projectRoot 'config.psd1')
+    $before = $current | ConvertTo-Json -Depth 20 -Compress
+    $current = Add-CurrentFeatureConfigurationDefaults -Config $current -Template $template
+    $after = $current | ConvertTo-Json -Depth 20 -Compress
+    if ($before -ne $after) {
+        Save-JsonFile -Path $configPath -Value $current | Out-Null
+        Write-Host '已补充当前版本缺失的配置字段；现有自定义值保持不变。' -ForegroundColor DarkCyan
+    }
 }
 
 function Sync-StartupAccountInstances {
@@ -135,12 +148,13 @@ function Show-MainMenu {
     Write-Host ' 10. 销毁实例'
     Write-Host ' 11. 永久删除持久卷'
     Write-Host ' 12. 连接账户已有脚本实例'
+    Write-Host ' 13. 管理 LoRA 清单'
     Write-Host '  0. 退出'
 
     $mapping = @{
         '1' = 'Deploy'; '2' = 'Search'; '3' = 'Status'; '4' = 'Tunnel'
         '5' = 'Provision'; '6' = 'Start'; '7' = 'Stop'; '8' = 'Configure'
-        '9' = 'Test'; '10' = 'Destroy'; '11' = 'RemoveVolume'; '12' = 'ConnectExisting'
+        '9' = 'Test'; '10' = 'Destroy'; '11' = 'RemoveVolume'; '12' = 'ConnectExisting'; '13' = 'ManageLoRA'
         '0' = 'Exit'
     }
     while ($true) {
@@ -222,6 +236,9 @@ function Invoke-MainOperation {
         'ConnectExisting' {
             & (Join-Path $scriptsRoot 'Connect-VastExistingInstance.ps1') -ConfigPath $configPath
         }
+        'ManageLoRA' {
+            & (Join-Path $scriptsRoot 'Manage-LoRAConfiguration.ps1') -ConfigPath $configPath
+        }
         default { throw "未知操作：$Name" }
     }
 }
@@ -240,6 +257,7 @@ if ($firstRun) {
         $Action = 'Deploy'
     }
 } else {
+    Update-DeploymentFeatureDefaults
     Update-DeploymentSshIdentity -PrivateKeyPath $environmentStatus.SshPrivateKey
 }
 

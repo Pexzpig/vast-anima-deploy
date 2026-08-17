@@ -152,6 +152,24 @@ function Add-CurrentFeatureConfigurationDefaults {
             }
         }
     }
+    if (-not $Config.Secrets.ContainsKey('CivitaiTokenEnvironmentVariable')) {
+        $Config.Secrets.CivitaiTokenEnvironmentVariable = [string]$Template.Secrets.CivitaiTokenEnvironmentVariable
+    }
+    foreach ($lora in @($Config.Anima.ManagedLoRAs)) {
+        if (-not $lora.ContainsKey('Source')) {
+            $lora.Source = if ([string]$lora.Url -match '^https://(?:www\.)?civitai\.com/') { 'civitai' } else { 'direct' }
+        }
+        if (-not $lora.ContainsKey('SourcePageUrl')) {
+            $lora.SourcePageUrl = if ([string]$lora.Source -eq 'civitai') { [string]$lora.Url } else { '' }
+        }
+        if (-not $lora.ContainsKey('ModelId')) { $lora.ModelId = $null }
+        if (-not $lora.ContainsKey('ModelVersionId')) {
+            $lora.ModelVersionId = if ([string]$lora.Url -match '/api/download/models/(\d+)') { [int64]$Matches[1] } else { $null }
+        }
+        if (-not $lora.ContainsKey('BaseModel')) { $lora.BaseModel = 'Anima' }
+        if (-not $lora.ContainsKey('TriggerWords')) { $lora.TriggerWords = @() }
+        if (-not $lora.ContainsKey('AutoApplyInComfyUI')) { $lora.AutoApplyInComfyUI = $true }
+    }
     return $Config
 }
 

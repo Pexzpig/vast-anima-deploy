@@ -35,6 +35,13 @@ try {
         Sha256 = ('a' * 64) -join ''
         Strength = 0.75
         Enabled = $true
+        Source = 'direct'
+        SourcePageUrl = ''
+        ModelId = $null
+        ModelVersionId = $null
+        BaseModel = 'Anima (user confirmed)'
+        TriggerWords = @('valid trigger')
+        AutoApplyInComfyUI = $false
     })
     $validPath = Join-Path $temporaryRoot 'valid.json'
     Save-JsonFile -Value $valid -Path $validPath | Out-Null
@@ -51,6 +58,15 @@ try {
     Test-ConfigurationRejected { param($c) $c.Anima.Turbo.Sha256 = 'bad' } 'invalid Turbo SHA-256'
     Test-ConfigurationRejected { param($c) $c.Anima.Turbo.EnabledByDefault = 'false' } 'non-Boolean Turbo default flag'
     Test-ConfigurationRejected { param($c) $c.Anima.ManualLoRASlots = 1 } 'missing style manual slot'
+    Test-ConfigurationRejected {
+        param($c)
+        $c.Anima.ManagedLoRAs = @(@{
+            Name = 'token.safetensors'; Kind = 'style'; Url = 'https://civitai.com/api/download/models/123?token=secret'
+            Sha256 = ('d' * 64) -join ''; Strength = 1.0; Enabled = $true; Source = 'civitai'
+            SourcePageUrl = 'https://civitai.com/models/1?modelVersionId=123'; ModelId = 1; ModelVersionId = 123
+            BaseModel = 'Anima'; TriggerWords = @(); AutoApplyInComfyUI = $false
+        })
+    } 'token-bearing Civitai URL'
     Test-ConfigurationRejected {
         param($c)
         $c.Anima.ManagedLoRAs = @(@{

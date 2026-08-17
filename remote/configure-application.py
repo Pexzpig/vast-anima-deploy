@@ -177,7 +177,7 @@ def configure_model_chain(workflow, subgraph, config):
 
     chain_specs = []
     for item in config["anima"].get("managed_loras", []):
-        if item.get("Enabled", False):
+        if item.get("Enabled", False) and item.get("AutoApplyInComfyUI", True):
             chain_specs.append(
                 (f"Managed {item['Kind'].title()} LoRA", str(item["Name"]), float(item["Strength"]), False)
             )
@@ -300,7 +300,11 @@ def build_standard_workflow(original, config):
     if str(turbo["name"]) not in serialized:
         raise ValueError("Managed workflow does not reference the configured Turbo LoRA")
     for item in config["anima"].get("managed_loras", []):
-        if item.get("Enabled", False) and str(item["Name"]) not in serialized:
+        if (
+            item.get("Enabled", False)
+            and item.get("AutoApplyInComfyUI", True)
+            and str(item["Name"]) not in serialized
+        ):
             raise ValueError(f"Managed workflow does not reference configured LoRA {item['Name']}")
     return workflow, model_source["id"]
 

@@ -3,6 +3,7 @@
         VastApiKeyEnvironmentVariable = 'VAST_API_KEY'
         OpenAIApiKeyEnvironmentVariable = 'OPENAI_API_KEY'
         HuggingFaceTokenEnvironmentVariable = 'HF_TOKEN'
+        CivitaiTokenEnvironmentVariable = 'CIVITAI_API_TOKEN'
     }
 
     Vast = @{

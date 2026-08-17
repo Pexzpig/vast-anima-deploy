@@ -7,6 +7,24 @@ if [[ $# -ne 1 || ! -f "$1" ]]; then
 fi
 
 deploy_config=$1
+secret_directory=$(dirname "$deploy_config")
+civitai_token_file="$secret_directory/.civitai-token"
+civitai_curl_config="$secret_directory/.civitai-curl.conf"
+cleanup_secrets() {
+  rm -f -- "$civitai_token_file" "$civitai_curl_config"
+}
+trap cleanup_secrets EXIT
+if [[ -s "$civitai_token_file" ]]; then
+  IFS= read -r civitai_token < "$civitai_token_file"
+  if [[ ! "$civitai_token" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo 'Civitai token contains unsupported characters.' >&2
+    exit 2
+  fi
+  umask 077
+  printf 'header = "Authorization: Bearer %s"\n' "$civitai_token" > "$civitai_curl_config"
+  unset civitai_token
+  rm -f -- "$civitai_token_file"
+fi
 stage_number=0
 stage_total=11
 current_stage='startup'
@@ -86,6 +104,7 @@ download_file() {
   local url=$1
   local destination=$2
   local expected_sha=$3
+  local source=${4:-direct}
   local partial="${destination}.part"
 
   mkdir -p "$(dirname "$destination")"
@@ -100,8 +119,14 @@ download_file() {
 
   echo "Downloading: $url"
   echo "Destination: $destination"
-  curl --fail --silent --show-error --location --retry 6 --retry-delay 5 \
-    --continue-at - --output "$partial" "$url" &
+  local -a curl_arguments=(
+    --fail --silent --show-error --location --retry 6 --retry-delay 5
+    --continue-at - --output "$partial"
+  )
+  if [[ "$source" == 'civitai' && -s "$civitai_curl_config" ]]; then
+    curl_arguments+=(--config "$civitai_curl_config")
+  fi
+  curl "${curl_arguments[@]}" "$url" &
   local curl_pid=$!
   while kill -0 "$curl_pid" 2>/dev/null; do
     if [[ -e "$partial" ]]; then
@@ -111,7 +136,12 @@ download_file() {
     fi
     sleep 10
   done
-  wait "$curl_pid"
+  if ! wait "$curl_pid"; then
+    if [[ "$source" == 'civitai' && ! -s "$civitai_curl_config" ]]; then
+      echo 'Civitai download failed. If this resource requires login, set CIVITAI_API_TOKEN in the local PowerShell process and provision again.' >&2
+    fi
+    return 1
+  fi
   if [[ -n "$expected_sha" ]]; then
     echo "Verifying SHA-256: $(basename "$destination")"
     echo "$expected_sha  $partial" | sha256sum --check --status || {
@@ -408,10 +438,14 @@ if [[ "$application_type" == 'comfyui' ]]; then
   turbo_url=$(json_required '.anima.turbo.url')
   turbo_sha=$(json_required '.anima.turbo.sha256')
   download_file "$turbo_url" "$lora_root/$turbo_name" "$turbo_sha"
-  while IFS=$'\t' read -r lora_name lora_url lora_sha; do
-    download_file "$lora_url" "$lora_root/$lora_name" "$lora_sha"
-  done < <(jq -r '.anima.managed_loras[] | select(.Enabled == true) | [.Name, .Url, .Sha256] | @tsv' "$deploy_config")
+else
+  lora_root="$app_root/models/Lora"
 fi
+mkdir -p "$lora_root"
+while IFS=$'\t' read -r lora_name lora_url lora_sha lora_source; do
+  download_file "$lora_url" "$lora_root/$lora_name" "$lora_sha" "$lora_source"
+done < <(jq -r '.anima.managed_loras[] | select(.Enabled == true) | [.Name, .Url, .Sha256, .Source] | @tsv' "$deploy_config")
+rm -f -- "$civitai_curl_config"
 
 stage 'Installing application workflow or baseline configuration'
 mkdir -p "$project_root/workflows/original"

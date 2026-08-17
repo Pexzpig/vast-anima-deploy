@@ -155,14 +155,6 @@ if [[ "$application_type" == 'comfyui' ]]; then
   else
     fail "Anima Turbo LoRA checksum $turbo_path"
   fi
-  while IFS=$'\t' read -r lora_name lora_sha; do
-    lora_path="$app_root/models/loras/$lora_name"
-    if [[ -s "$lora_path" ]] && echo "$lora_sha  $lora_path" | sha256sum --check --status; then
-      ok "Managed Anima LoRA $lora_name"
-    else
-      fail "Managed Anima LoRA checksum $lora_path"
-    fi
-  done < <(jq -r '.anima.managed_loras[] | select(.Enabled == true) | [.Name, .Sha256] | @tsv' "$deploy_config")
 else
   webui_config="$app_root/config.json"
   localization=$(json_value '.webui.localization')
@@ -186,6 +178,20 @@ else
     fi
   done < <(jq -r '.webui.extensions[] | select(.Enabled == true) | [.Name, .Commit] | @tsv' "$deploy_config")
 fi
+
+if [[ "$application_type" == 'comfyui' ]]; then
+  lora_root="$app_root/models/loras"
+else
+  lora_root="$app_root/models/Lora"
+fi
+while IFS=$'\t' read -r lora_name lora_sha; do
+  lora_path="$lora_root/$lora_name"
+  if [[ -s "$lora_path" ]] && echo "$lora_sha  $lora_path" | sha256sum --check --status; then
+    ok "Managed Anima LoRA $lora_name"
+  else
+    fail "Managed Anima LoRA checksum $lora_path"
+  fi
+done < <(jq -r '.anima.managed_loras[] | select(.Enabled == true) | [.Name, .Sha256] | @tsv' "$deploy_config")
 
 if [[ -s "$project_root/records/anima-baseline.json" ]]; then
   ok "Baseline record $project_root/records/anima-baseline.json"
