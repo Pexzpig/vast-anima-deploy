@@ -72,5 +72,8 @@ foreach ($forbidden in @('Get-DeploymentState', 'Save-DeploymentState', 'Destroy
 if (-not $entry.Contains("'12' = 'ConnectExisting'") -or -not $entry.Contains('Connect-VastExistingInstance.ps1')) {
     throw 'The main menu does not expose the isolated existing-instance connector.'
 }
+if ($connector.Contains("-match '(?i)ssh|") -or -not $connector.Contains('permission denied|publickey')) {
+    throw 'Generic SSH readiness failures are being misreported as private-key authentication failures.'
+}
 
 Write-Host 'Isolated existing script instance connection checks passed.' -ForegroundColor Green

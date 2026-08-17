@@ -106,6 +106,11 @@ function Add-CurrentFeatureConfigurationDefaults {
 
     # These are forward additions to the current single configuration schema.
     # No obsolete selection files are read, and existing values always win.
+    foreach ($field in @('ReadyTimeoutSeconds', 'ReadyPollIntervalSeconds')) {
+        if (-not $Config.Vast.Ssh.ContainsKey($field)) {
+            $Config.Vast.Ssh[$field] = ConvertTo-HashtableDeep -InputObject $Template.Vast.Ssh[$field]
+        }
+    }
     foreach ($field in @(
         'TorchVersion', 'TorchvisionVersion', 'TorchaudioVersion', 'TorchCudaVersion', 'TorchIndexUrl'
     )) {
@@ -1101,6 +1106,54 @@ function Wait-VastVolumeVisible {
     throw "Timed out waiting for volume $VolumeId to become visible."
 }
 
+function Resolve-VastSshEndpointFromInstance {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Config,
+        [Parameter(Mandatory = $true)][int64]$InstanceId,
+        [Parameter(Mandatory = $true)]$Instance,
+        [switch]$AllowUnavailable,
+        [switch]$SkipCliFallback,
+        [ValidateRange(1, 30)][int]$CliTimeoutSeconds = 30
+    )
+
+    $hostName = Get-ObjectProperty -Object $Instance -Names @('ssh_host', 'public_ipaddr', 'public_ip')
+    $port = Get-ObjectProperty -Object $Instance -Names @('ssh_port')
+
+    if ($null -eq $port -and (Test-ObjectProperty -Object $Instance -Name 'ports')) {
+        $ports = if ($Instance -is [System.Collections.IDictionary]) { $Instance['ports'] } else { $Instance.ports }
+        foreach ($key in @('22/tcp', '22')) {
+            if ($null -ne $ports -and (Test-ObjectProperty -Object $ports -Name $key)) {
+                $mapping = if ($ports -is [System.Collections.IDictionary]) { $ports[$key] } else { $ports.$key }
+                $port = Get-ObjectProperty -Object $mapping -Names @('HostPort', 'host_port')
+                break
+            }
+        }
+    }
+
+    if (($null -eq $hostName -or $null -eq $port) -and -not $SkipCliFallback) {
+        try {
+            $url = Invoke-VastText -Config $Config -Arguments @('ssh-url', [string]$InstanceId) -TimeoutSeconds $CliTimeoutSeconds
+            if ($url -match 'ssh://(?:(?<user>[^@/]+)@)?(?<host>[^:/\s]+):(?<port>\d+)') {
+                $hostName = $Matches.host
+                $port = $Matches.port
+            }
+        } catch {
+            if (-not $AllowUnavailable) { throw }
+        }
+    }
+
+    if ($null -eq $hostName -or $null -eq $port) {
+        if ($AllowUnavailable) { return $null }
+        throw "Could not resolve SSH endpoint for instance $InstanceId."
+    }
+
+    return [pscustomobject]@{
+        User = [string]$Config.Vast.Ssh.User
+        Host = [string]$hostName
+        Port = [int]$port
+    }
+}
+
 function Get-VastSshEndpoint {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Config,
@@ -1110,37 +1163,7 @@ function Get-VastSshEndpoint {
     $instanceResponse = Invoke-VastJson -Config $Config -Arguments @('show', 'instance', [string]$InstanceId, '--raw')
     $items = @(ConvertTo-ObjectArray -Value $instanceResponse -CandidateProperties @('instances'))
     if ($items.Count -eq 0) { throw "Instance $InstanceId was not returned by Vast." }
-    $instance = $items[0]
-    $hostName = Get-ObjectProperty -Object $instance -Names @('ssh_host', 'public_ipaddr', 'public_ip')
-    $port = Get-ObjectProperty -Object $instance -Names @('ssh_port')
-
-    if ($null -eq $port -and $instance.PSObject.Properties.Name -contains 'ports') {
-        $ports = $instance.ports
-        foreach ($key in @('22/tcp', '22')) {
-            if ($ports.PSObject.Properties.Name -contains $key) {
-                $port = Get-ObjectProperty -Object $ports.$key -Names @('HostPort', 'host_port')
-                break
-            }
-        }
-    }
-
-    if ($null -eq $hostName -or $null -eq $port) {
-        $url = Invoke-VastText -Config $Config -Arguments @('ssh-url', [string]$InstanceId)
-        if ($url -match 'ssh://(?:(?<user>[^@/]+)@)?(?<host>[^:/\s]+):(?<port>\d+)') {
-            $hostName = $Matches.host
-            $port = $Matches.port
-        }
-    }
-
-    if ($null -eq $hostName -or $null -eq $port) {
-        throw "Could not resolve SSH endpoint for instance $InstanceId."
-    }
-
-    return [pscustomobject]@{
-        User = [string]$Config.Vast.Ssh.User
-        Host = [string]$hostName
-        Port = [int]$port
-    }
+    return Resolve-VastSshEndpointFromInstance -Config $Config -InstanceId $InstanceId -Instance $items[0]
 }
 
 function Get-SshCommonArguments {
@@ -1178,41 +1201,136 @@ function Get-SshCommonArguments {
 function Wait-VastSshReady {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Config,
-        [Parameter(Mandatory = $true)]$Endpoint,
-        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 180,
-        [ValidateRange(1, 60)][int]$PollIntervalSeconds = 5
+        [Parameter(Mandatory = $true)][int64]$InstanceId,
+        [ValidateRange(0, 3600)][int]$TimeoutSeconds = 0,
+        [ValidateRange(0, 60)][int]$PollIntervalSeconds = 0,
+        [ValidateRange(0, 300)][int]$TerminalStateGraceSeconds = 45
     )
 
     Assert-CommandExists -Name 'ssh'
+    if ($TimeoutSeconds -le 0) { $TimeoutSeconds = [int]$Config.Vast.Ssh.ReadyTimeoutSeconds }
+    if ($PollIntervalSeconds -le 0) { $PollIntervalSeconds = [int]$Config.Vast.Ssh.ReadyPollIntervalSeconds }
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    $attempt = 0
-    $lastResult = $null
     $sshCommon = @(Get-SshCommonArguments -Config $Config) + @('-o', 'LogLevel=QUIET')
-    $target = "$($Endpoint.User)@$($Endpoint.Host)"
     $startedAt = Get-Date
+    $lastEndpoint = $null
+    $lastStatus = 'unavailable'
+    $lastStatusDetails = 'Vast status has not been returned yet.'
+    $lastStatusError = $null
+    $lastSshSummary = 'SSH has not been attempted yet.'
+    $terminalStateSince = $null
+    $immediateFatalStates = @('error', 'failed')
+    $graceTerminalStates = @('exited', 'stopped', 'offline', 'unknown', 'frozen')
 
     while ((Get-Date) -lt $deadline) {
-        $attempt++
-        $lastResult = Invoke-NativeCommandCapture -Command 'ssh' -Arguments ($sshCommon + @(
-            '-T', '-n',
-            '-o', 'ConnectionAttempts=1',
-            '-p', [string]$Endpoint.Port,
-            $target,
-            "printf 'SSH_READY\\n'"
-        ))
-        if ($lastResult.ExitCode -eq 0 -and $lastResult.Text -match 'SSH_READY') {
-            Write-TransientStatus -Message "SSH is ready at ${target}:$($Endpoint.Port) (attempt $attempt)." -Complete -ForegroundColor Green
-            return
+        $statusAvailable = $false
+        $statusMessage = ''
+        try {
+            $statusQueryTimeoutSeconds = [Math]::Max(1, [Math]::Min(30, [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)))
+            $instanceResponse = Invoke-VastJson `
+                -Config $Config `
+                -Arguments @('show', 'instance', [string]$InstanceId, '--raw') `
+                -TimeoutSeconds $statusQueryTimeoutSeconds
+            $items = @(ConvertTo-ObjectArray -Value $instanceResponse -CandidateProperties @('instances'))
+            if ($items.Count -eq 0) { throw "Instance $InstanceId was not returned by Vast." }
+            $instance = $items[0]
+            if (Test-ObjectProperty -Object $instance -Name 'actual_status') {
+                $rawStatus = if ($instance -is [System.Collections.IDictionary]) { $instance['actual_status'] } else { $instance.actual_status }
+                $lastStatus = if ($null -eq $rawStatus -or [string]::IsNullOrWhiteSpace([string]$rawStatus)) { 'provisioning' } else { ([string]$rawStatus).Trim().ToLowerInvariant() }
+            } else {
+                $lastStatus = ([string](Get-ObjectProperty -Object $instance -Names @('status', 'cur_state') -Default 'unknown')).Trim().ToLowerInvariant()
+            }
+            $intendedStatus = [string](Get-ObjectProperty -Object $instance -Names @('intended_status') -Default 'unknown')
+            $currentState = [string](Get-ObjectProperty -Object $instance -Names @('cur_state') -Default 'unknown')
+            $nextState = [string](Get-ObjectProperty -Object $instance -Names @('next_state') -Default 'unknown')
+            $statusMessage = (([string](Get-ObjectProperty -Object $instance -Names @('status_msg') -Default '')) -replace '\s+', ' ').Trim()
+            if ($statusMessage.Length -gt 300) { $statusMessage = $statusMessage.Substring(0, 297) + '...' }
+            $lastStatusDetails = "actual=$lastStatus, intended=$intendedStatus, current=$currentState, next=$nextState"
+            if ($statusMessage) { $lastStatusDetails += ", message=$statusMessage" }
+            $endpointQueryTimeoutSeconds = [Math]::Max(1, [Math]::Min(30, [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)))
+            $resolvedEndpoint = Resolve-VastSshEndpointFromInstance `
+                -Config $Config `
+                -InstanceId $InstanceId `
+                -Instance $instance `
+                -AllowUnavailable `
+                -SkipCliFallback:($lastStatus -ne 'running') `
+                -CliTimeoutSeconds $endpointQueryTimeoutSeconds
+            if ($null -ne $resolvedEndpoint) { $lastEndpoint = $resolvedEndpoint }
+            $lastStatusError = $null
+            $statusAvailable = $true
+        } catch {
+            $lastStatusError = (($_.Exception.Message -replace '\s+', ' ').Trim())
+            if ($lastStatusError.Length -gt 500) { $lastStatusError = $lastStatusError.Substring(0, 497) + '...' }
+            $lastStatus = 'unavailable'
         }
 
         $elapsedSeconds = [int]((Get-Date) - $startedAt).TotalSeconds
-        Write-TransientStatus -Message "Waiting for SSH at ${target}:$($Endpoint.Port) (attempt $attempt, ${elapsedSeconds}s elapsed)..." -ForegroundColor DarkYellow
-        Start-Sleep -Seconds $PollIntervalSeconds
+        $endpointText = if ($null -eq $lastEndpoint) { 'pending' } else { "$($lastEndpoint.Host):$($lastEndpoint.Port)" }
+        $statusSuffix = ''
+        if ($statusMessage) {
+            $statusMessageDisplay = ($statusMessage -replace '\s+', ' ').Trim()
+            if ($statusMessageDisplay.Length -gt 70) { $statusMessageDisplay = $statusMessageDisplay.Substring(0, 67) + '...' }
+            $statusSuffix = ", message=$statusMessageDisplay"
+        } elseif ($lastStatusError) {
+            $statusSuffix = ', status query unavailable'
+        }
+        Write-TransientStatus `
+            -Message "Waiting for SSH: Vast=$lastStatus, endpoint=$endpointText, elapsed=${elapsedSeconds}/${TimeoutSeconds}s$statusSuffix" `
+            -ForegroundColor DarkYellow
+
+        if ($statusAvailable) {
+            if ($immediateFatalStates -contains $lastStatus) {
+                Write-TransientStatus -Message "Instance $InstanceId failed while waiting for SSH." -Complete -ForegroundColor Red
+                throw "Instance $InstanceId cannot become SSH-ready ($lastStatusDetails). Run 'vastai show instance $InstanceId --raw' and 'vastai logs $InstanceId --tail 200' for details."
+            }
+            if ($graceTerminalStates -contains $lastStatus) {
+                if ($null -eq $terminalStateSince) { $terminalStateSince = Get-Date }
+                if (((Get-Date) - $terminalStateSince).TotalSeconds -ge $TerminalStateGraceSeconds) {
+                    Write-TransientStatus -Message "Instance $InstanceId remained in '$lastStatus' while waiting for SSH." -Complete -ForegroundColor Red
+                    throw "Instance $InstanceId remained in '$lastStatus' for $TerminalStateGraceSeconds seconds while waiting for SSH ($lastStatusDetails). Run 'vastai show instance $InstanceId --raw' and 'vastai logs $InstanceId --tail 200' for details."
+                }
+            } else {
+                $terminalStateSince = $null
+            }
+        }
+
+        $shouldProbeSsh = $null -ne $lastEndpoint -and (($statusAvailable -and $lastStatus -eq 'running') -or -not $statusAvailable)
+        if ($shouldProbeSsh) {
+            $target = "$($lastEndpoint.User)@$($lastEndpoint.Host)"
+            $remainingSeconds = [Math]::Max(1, [int][Math]::Ceiling(($deadline - (Get-Date)).TotalSeconds))
+            $probeTimeoutSeconds = [Math]::Min($remainingSeconds, [Math]::Max(5, [int]$Config.Vast.Ssh.ConnectTimeoutSeconds + 10))
+            try {
+                $lastResult = Invoke-NativeCommandCapture -Command 'ssh' -Arguments ($sshCommon + @(
+                    '-T', '-n',
+                    '-o', 'ConnectionAttempts=1',
+                    '-p', [string]$lastEndpoint.Port,
+                    $target,
+                    "printf 'SSH_READY\\n'"
+                )) -TimeoutSeconds $probeTimeoutSeconds
+                if ($lastResult.ExitCode -eq 0 -and $lastResult.Text -match 'SSH_READY') {
+                    $elapsedSeconds = [int]((Get-Date) - $startedAt).TotalSeconds
+                    Write-TransientStatus -Message "SSH is ready at ${target}:$($lastEndpoint.Port) after ${elapsedSeconds}s." -Complete -ForegroundColor Green
+                    return $lastEndpoint
+                }
+                $failureLines = @($lastResult.Text -split "`r?`n" | Where-Object {
+                    $_ -and $_ -notmatch '^(Welcome to vast\.ai\.|Have fun!|AI agents:)'
+                })
+                $lastSshSummary = if ($failureLines.Count -gt 0) { [string]$failureLines[-1] } else { "SSH probe exited with code $($lastResult.ExitCode)." }
+            } catch {
+                $lastSshSummary = (($_.Exception.Message -replace '\s+', ' ').Trim())
+                if ($lastSshSummary.Length -gt 500) { $lastSshSummary = $lastSshSummary.Substring(0, 497) + '...' }
+            }
+        }
+
+        $remainingForSleep = [int][Math]::Floor(($deadline - (Get-Date)).TotalSeconds)
+        if ($remainingForSleep -gt 0) {
+            Start-Sleep -Seconds ([Math]::Min($PollIntervalSeconds, $remainingForSleep))
+        }
     }
 
-    $lastText = if ($null -ne $lastResult) { $lastResult.Text } else { 'No SSH attempt completed.' }
-    Write-TransientStatus -Message "Timed out waiting for SSH at ${target}:$($Endpoint.Port)." -Complete -ForegroundColor Red
-    throw "Timed out after $TimeoutSeconds seconds waiting for SSH at ${target}:$($Endpoint.Port).`n$lastText"
+    $statusErrorSuffix = if ($lastStatusError) { " Last Vast query error: $lastStatusError" } else { '' }
+    Write-TransientStatus -Message "Timed out waiting for SSH for instance $InstanceId." -Complete -ForegroundColor Red
+    throw "Timed out after $TimeoutSeconds seconds waiting for SSH for instance $InstanceId. Last Vast state: $lastStatusDetails.$statusErrorSuffix Last SSH result: $lastSshSummary. Run 'vastai show instance $InstanceId --raw' and 'vastai logs $InstanceId --tail 200' for details."
 }
 
 function Invoke-RemoteDeploymentVerification {

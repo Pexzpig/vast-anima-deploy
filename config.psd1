@@ -45,6 +45,8 @@
             IdentityFile = ''
             StrictHostKeyChecking = 'accept-new'
             ConnectTimeoutSeconds = 15
+            ReadyTimeoutSeconds = 900
+            ReadyPollIntervalSeconds = 10
         }
     }
 

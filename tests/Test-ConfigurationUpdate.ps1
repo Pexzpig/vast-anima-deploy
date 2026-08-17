@@ -8,6 +8,8 @@ $config.Codex.ProjectRoot = '/workspace/custom-project'
 $config.ComfyUI.LocalPort = 39188
 $config.WebUI.Repository = 'https://example.invalid/custom-webui.git'
 $config.Vast.Ssh.IdentityFile = 'C:\keys\custom-ed25519'
+$config.Vast.Ssh.ReadyTimeoutSeconds = 1234
+$config.Vast.Ssh.ReadyPollIntervalSeconds = 17
 $config.Local.RemoteUploadDirectory = '/tmp/custom-upload'
 $originalModelUrl = [string]$config.Anima.Models[0].Url
 
@@ -31,6 +33,8 @@ if ($updated.Codex.ProjectRoot -ne '/workspace/custom-project' -or
     $updated.ComfyUI.LocalPort -ne 39188 -or
     $updated.WebUI.Repository -ne 'https://example.invalid/custom-webui.git' -or
     $updated.Vast.Ssh.IdentityFile -ne 'C:\keys\custom-ed25519' -or
+    $updated.Vast.Ssh.ReadyTimeoutSeconds -ne 1234 -or
+    $updated.Vast.Ssh.ReadyPollIntervalSeconds -ne 17 -or
     $updated.Local.RemoteUploadDirectory -ne '/tmp/custom-upload' -or
     [string]$updated.Anima.Models[0].Url -ne $originalModelUrl) {
     throw 'Updating search preferences reset unrelated deployment configuration.'
@@ -38,6 +42,8 @@ if ($updated.Codex.ProjectRoot -ne '/workspace/custom-project' -or
 
 $template = Get-DeployConfig -ConfigPath 'config.psd1'
 $forwardConfig = Get-DeployConfig -ConfigPath 'config.psd1'
+$forwardConfig.Vast.Ssh.Remove('ReadyTimeoutSeconds')
+$forwardConfig.Vast.Ssh.Remove('ReadyPollIntervalSeconds')
 $forwardConfig.ComfyUI.Remove('TorchVersion')
 $forwardConfig.ComfyUI.Remove('TorchvisionVersion')
 $forwardConfig.ComfyUI.Remove('TorchaudioVersion')
@@ -64,6 +70,8 @@ $forwardConfig.Anima.WorkflowUrl = 'https://raw.githubusercontent.com/Comfy-Org/
 $forwardConfig.Codex.ProjectRoot = '/workspace/preserved-forward-config'
 $forwardConfig = Add-CurrentFeatureConfigurationDefaults -Config $forwardConfig -Template $template
 if ($forwardConfig.ComfyUI.TorchVersion -ne '2.11.0' -or
+    $forwardConfig.Vast.Ssh.ReadyTimeoutSeconds -ne 900 -or
+    $forwardConfig.Vast.Ssh.ReadyPollIntervalSeconds -ne 10 -or
     $forwardConfig.ComfyUI.TorchvisionVersion -ne '0.26.0' -or
     $forwardConfig.ComfyUI.TorchaudioVersion -ne '2.11.0' -or
     $forwardConfig.ComfyUI.TorchCudaVersion -ne '12.8' -or

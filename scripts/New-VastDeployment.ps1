@@ -12,7 +12,9 @@ param(
 . (Join-Path $PSScriptRoot 'Common.ps1')
 
 if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
-$config = Get-DeployConfig -ConfigPath $ConfigPath
+$config = Add-CurrentFeatureConfigurationDefaults `
+    -Config (Get-DeployConfig -ConfigPath $ConfigPath) `
+    -Template (Get-DeployConfig -ConfigPath 'config.psd1')
 $volumeConfig = $config.Vast.Volume
 $resumeState = $null
 $usePersistentVolume = $false
@@ -348,10 +350,9 @@ Wait-VastInstanceRunning -Config $config -InstanceId $state.instance_id | Out-Nu
 $state.instance_status = 'running'
 Save-DeploymentState -Config $config -State $state | Out-Null
 
-$endpoint = Get-VastSshEndpoint -Config $config -InstanceId $state.instance_id
+$endpoint = Wait-VastSshReady -Config $config -InstanceId $state.instance_id
 $state.ssh_host = $endpoint.Host
 $state.ssh_port = $endpoint.Port
 Save-DeploymentState -Config $config -State $state | Out-Null
 
-Wait-VastSshReady -Config $config -Endpoint $endpoint
 Write-Host "Next: .\scripts\Provision-Instance.ps1"

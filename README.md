@@ -65,6 +65,8 @@ Get-ChildItem -Recurse -File | Unblock-File
 8. 配置 Supervisor、等待应用健康接口，并安装 Codex CLI。
 9. 完成 GPU、模型、工作流或扩展、服务和健康接口检查后，将部署标记为完成。
 
+实例容器和 SSH 服务分别等待最多 15 分钟。SSH 阶段会持续读取 Vast 的 `actual_status`、`cur_state`、`next_state` 和 `status_msg`，并在同一行显示启动阶段、endpoint 和已等待时间；`loading` 或 endpoint 尚未生成时不会反复发起 SSH 连接。可通过 `Vast.Ssh.ReadyTimeoutSeconds` 和 `ReadyPollIntervalSeconds` 调整 SSH 阶段。
+
 若网络或 SSH 中断，可再次执行 `Deploy` 或 `Provision`。脚本会复用已经创建的卷、实例、Git 仓库、虚拟环境和模型下载临时文件，不会在已有活动资源时重复租用。
 
 ## 配置与状态
@@ -156,6 +158,8 @@ scp -i C:\path\to\id_ed25519 -P 12345 D:\models\example.safetensors root@ssh.exa
 ```
 
 也可以使用 WinSCP 的 SFTP 模式连接同一 SSH endpoint。清单中停用或移除条目不会删除远端文件。
+
+上传后先刷新应用页面。ComfyUI 在角色或画风 LoRA 节点中选择文件并设置权重、触发词；WebUI 在 Extra Networks 中刷新并点击 LoRA 卡片。若新文件仍未出现，可在 SSH 终端执行 `supervisorctl restart comfyui` 或 `supervisorctl restart webui`。手工上传不会加入自动安装清单，文件生命周期跟随当前实例磁盘或持久卷。
 
 ## 连接其他环境创建的实例
 

@@ -58,6 +58,8 @@ try {
     Test-ConfigurationRejected { param($c) $c.Anima.Turbo.Sha256 = 'bad' } 'invalid Turbo SHA-256'
     Test-ConfigurationRejected { param($c) $c.Anima.Turbo.EnabledByDefault = 'false' } 'non-Boolean Turbo default flag'
     Test-ConfigurationRejected { param($c) $c.Anima.ManualLoRASlots = 1 } 'missing style manual slot'
+    Test-ConfigurationRejected { param($c) $c.Vast.Ssh.ReadyTimeoutSeconds = 30 } 'SSH readiness timeout below 60 seconds'
+    Test-ConfigurationRejected { param($c) $c.Vast.Ssh.ReadyPollIntervalSeconds = 0 } 'SSH readiness polling interval below one second'
     Test-ConfigurationRejected {
         param($c)
         $c.Anima.ManagedLoRAs = @(@{

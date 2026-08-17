@@ -9,7 +9,9 @@ param(
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
-$config = Get-DeployConfig -ConfigPath $ConfigPath
+$config = Add-CurrentFeatureConfigurationDefaults `
+    -Config (Get-DeployConfig -ConfigPath $ConfigPath) `
+    -Template (Get-DeployConfig -ConfigPath 'config.psd1')
 Assert-CommandExists -Name 'ssh'
 
 function Read-MenuNumber {
@@ -168,12 +170,11 @@ try {
         Wait-VastInstanceRunning -Config $config -InstanceId $selectedId | Out-Null
     }
 
-    $endpoint = Get-VastSshEndpoint -Config $config -InstanceId $selectedId
-    Wait-VastSshReady -Config $config -Endpoint $endpoint
+    $endpoint = Wait-VastSshReady -Config $config -InstanceId $selectedId
     $identity = Get-RemoteScriptDeploymentIdentity -Endpoint $endpoint
 } catch {
     if ($startedByThisRun) { Stop-ConnectionStartedInstance -Id $selectedId }
-    if ($_.Exception.Message -match '(?i)ssh|permission denied|publickey|authentication') {
+    if ($_.Exception.Message -match '(?i)permission denied|publickey|authentication failed|no supported authentication') {
         throw "$($_.Exception.Message)`n当前环境必须持有该实例接受的 SSH 私钥；请使用原环境私钥，或在 Vast 控制台为实例授权当前公钥。"
     }
     throw

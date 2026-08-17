@@ -14,6 +14,8 @@ if ([string]$config.Vast.Instance.OnStartCommand -ne '/opt/instance-tools/bin/en
 if ([int]$config.Vast.Instance.ContainerDiskGb -lt 30) { $errors.Add('ContainerDiskGb should be at least 30.') }
 if ([bool]$config.Vast.Volume.Enabled -and [int]$config.Vast.Volume.SizeGb -lt 50) { $errors.Add('Anima volume should be at least 50 GB.') }
 if ([string]$config.Vast.Volume.MountPath -ne '/workspace') { $errors.Add('This example expects the persistent volume at /workspace.') }
+if ([int]$config.Vast.Ssh.ReadyTimeoutSeconds -lt 60 -or [int]$config.Vast.Ssh.ReadyTimeoutSeconds -gt 3600) { $errors.Add('Vast.Ssh.ReadyTimeoutSeconds must be between 60 and 3600.') }
+if ([int]$config.Vast.Ssh.ReadyPollIntervalSeconds -lt 1 -or [int]$config.Vast.Ssh.ReadyPollIntervalSeconds -gt 60) { $errors.Add('Vast.Ssh.ReadyPollIntervalSeconds must be between 1 and 60.') }
 if ([string]$config.PyTorch.Python -notmatch '^/') { $errors.Add('PyTorch.Python must be an absolute Linux path.') }
 if ([string]$config.PyTorch.MinimumCudaVersion -notmatch '^\d+\.\d+$') { $errors.Add('PyTorch.MinimumCudaVersion must use major.minor format.') }
 if ([string]$config.Application.DefaultType -notin @('comfyui', 'webui')) { $errors.Add('Application.DefaultType must be comfyui or webui.') }

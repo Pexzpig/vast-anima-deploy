@@ -42,10 +42,9 @@ function New-RestrictedSecretFile {
 
 Write-Host '[local 1/5] Waiting for the Vast.ai instance and resolving its SSH endpoint...' -ForegroundColor Cyan
 Wait-VastInstanceRunning -Config $config -InstanceId $state.instance_id | Out-Null
-$endpoint = Get-VastSshEndpoint -Config $config -InstanceId $state.instance_id
+$endpoint = Wait-VastSshReady -Config $config -InstanceId $state.instance_id
 $sshCommon = @(Get-SshCommonArguments -Config $config)
 $automatedSshCommon = $sshCommon + @('-o', 'LogLevel=QUIET')
-Wait-VastSshReady -Config $config -Endpoint $endpoint
 
 Write-Host '[local 2/5] Generating the remote deployment configuration...' -ForegroundColor Cyan
 $remoteConfig = [ordered]@{
