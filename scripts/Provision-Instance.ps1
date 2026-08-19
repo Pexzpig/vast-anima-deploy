@@ -2,12 +2,25 @@
 param([string]$ConfigPath)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
+Import-Module (Join-Path $PSScriptRoot 'LoRA-Configuration.psm1') -Force
 if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
 $config = Add-CurrentFeatureConfigurationDefaults `
     -Config (Get-DeployConfig -ConfigPath $ConfigPath) `
     -Template (Get-DeployConfig -ConfigPath 'config.psd1')
 $state = Get-DeploymentState -Config $config
 $application = Get-DeploymentApplication -Config $config -State $state
+$localLoRAs = @(Get-LocalLoRAFiles `
+    -ProjectRoot $script:ProjectRoot `
+    -RelativeDirectory ([string]$config.Local.LoRADirectory) `
+    -CreateDirectory)
+$reservedLoRAPaths = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($managedLoRA in @($config.Anima.ManagedLoRAs)) { [void]$reservedLoRAPaths.Add([string]$managedLoRA.Name) }
+if ($application.Type -eq 'comfyui') { [void]$reservedLoRAPaths.Add([string]$config.Anima.Turbo.Name) }
+foreach ($localLoRA in $localLoRAs) {
+    if ($reservedLoRAPaths.Contains([string]$localLoRA.RelativePath)) {
+        throw "Local LoRA conflicts with a Turbo or URL-managed LoRA destination: $($localLoRA.RelativePath)"
+    }
+}
 $deploymentImage = [string]$state.deployment_image
 if ($deploymentImage -ne [string]$config.Vast.Instance.Image -and $state.instance_id -and [string]$state.instance_status -ne 'destroyed') {
     throw "Instance $($state.instance_id) was created from '$deploymentImage', but the current template is '$($config.Vast.Instance.Image)'. Keep managing the existing instance or destroy it before creating a PyTorch-based deployment; an instance image cannot be replaced in place."
@@ -119,6 +132,14 @@ $remoteConfig = [ordered]@{
             enabled_by_default = [bool]$config.Anima.Turbo.EnabledByDefault
         }
         managed_loras = @($config.Anima.ManagedLoRAs)
+        local_loras = @($localLoRAs | ForEach-Object {
+            [ordered]@{
+                relative_path = [string]$_.RelativePath
+                sha256 = [string]$_.Sha256
+                size_bytes = [int64]$_.SizeBytes
+                staging_id = [string]$_.StagingId
+            }
+        })
         manual_lora_slots = [int]$config.Anima.ManualLoRASlots
         hires = [ordered]@{
             scale = [double]$config.Anima.Hires.Scale
@@ -148,7 +169,8 @@ $provisionScriptPath = Resolve-ProjectPath -Path ([string]$config.Local.Provisio
 $codexScriptPath = Resolve-ProjectPath -Path ([string]$config.Local.CodexScriptPath)
 $verifyScriptPath = Resolve-ProjectPath -Path 'remote/verify-deployment.sh'
 $applicationConfigScriptPath = Resolve-ProjectPath -Path 'remote/configure-application.py'
-foreach ($requiredScript in @($provisionScriptPath, $codexScriptPath, $verifyScriptPath, $applicationConfigScriptPath)) {
+$localLoRAInstallerPath = Resolve-ProjectPath -Path 'remote/install-local-loras.py'
+foreach ($requiredScript in @($provisionScriptPath, $codexScriptPath, $verifyScriptPath, $applicationConfigScriptPath, $localLoRAInstallerPath)) {
     if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
         throw "Remote script not found: $requiredScript"
     }
@@ -157,7 +179,7 @@ foreach ($requiredScript in @($provisionScriptPath, $codexScriptPath, $verifyScr
 $target = "$($endpoint.User)@$($endpoint.Host)"
 Write-Host "[local 3/5] Uploading deployment scripts to $target..." -ForegroundColor Cyan
 Invoke-NativeCommandCheckedWithRetry -Command 'ssh' -Arguments ($automatedSshCommon + @(
-    '-T', '-n', '-p', [string]$endpoint.Port, $target, "mkdir -p '$remoteUploadDirectory/remote' && exit"
+    '-T', '-n', '-p', [string]$endpoint.Port, $target, "mkdir -p '$remoteUploadDirectory/remote' '$remoteUploadDirectory/local-loras' && exit"
 )) -FailureMessage 'Could not create remote upload directory.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 60 -Quiet
 
 $scpCommon = @('-q') + $automatedSshCommon
@@ -174,8 +196,45 @@ Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $applicationConfigScriptPath, "${target}:$remoteUploadDirectory/remote/configure-application.py"
 )) -FailureMessage 'Uploading the remote application configurator failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120 -Quiet
 Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
+    '-P', [string]$endpoint.Port, $localLoRAInstallerPath, "${target}:$remoteUploadDirectory/remote/install-local-loras.py"
+)) -FailureMessage 'Uploading the local LoRA installer failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120 -Quiet
+Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
     '-P', [string]$endpoint.Port, $generatedConfig, "${target}:$remoteUploadDirectory/remote-config.json"
 )) -FailureMessage 'Uploading remote configuration failed.' -Attempts 4 -DelaySeconds 5 -TimeoutSeconds 120 -Quiet
+
+if ($localLoRAs.Count -gt 0) {
+    $loraRoot = if ($application.Type -eq 'comfyui') { "$($config.ComfyUI.Root)/models/loras" } else { "$($config.WebUI.Root)/models/Lora" }
+    $remoteLoRAInstaller = "$remoteUploadDirectory/remote/install-local-loras.py"
+    $remoteLoRAStaging = "$remoteUploadDirectory/local-loras"
+    $checkCommand = "python3 '$remoteLoRAInstaller' check '$remoteUploadDirectory/remote-config.json' '$loraRoot' '$remoteLoRAStaging'"
+    $checkResult = Invoke-NativeCommandCapture -Command 'ssh' -Arguments ($automatedSshCommon + @(
+        '-T', '-n', '-p', [string]$endpoint.Port, $target, $checkCommand
+    ))
+    if ($checkResult.ExitCode -ne 0) { throw "Checking remote local-LoRA state failed.`n$($checkResult.Text)" }
+    $states = @{}
+    foreach ($line in $checkResult.Output) {
+        $parts = @($line -split "`t", 2)
+        if ($parts.Count -eq 2) { $states[$parts[0]] = $parts[1] }
+    }
+    for ($index = 0; $index -lt $localLoRAs.Count; $index++) {
+        $item = $localLoRAs[$index]
+        $stateName = [string]$states[[string]$item.StagingId]
+        if ($stateName -in @('installed', 'staged')) {
+            Write-Host ("Local LoRA [{0}/{1}] already {2}: {3}" -f ($index + 1), $localLoRAs.Count, $stateName, $item.RelativePath) -ForegroundColor DarkGray
+            continue
+        }
+        if ($stateName -ne 'upload') { throw "Remote preflight did not return a valid state for local LoRA: $($item.RelativePath)" }
+        Write-Host ("Uploading local LoRA [{0}/{1}] {2} ({3:N1} MB)..." -f ($index + 1), $localLoRAs.Count, $item.RelativePath, ($item.SizeBytes / 1MB)) -ForegroundColor Cyan
+        Invoke-NativeCommandCheckedWithRetry -Command 'scp' -Arguments ($scpCommon + @(
+            '-P', [string]$endpoint.Port, [string]$item.LocalPath,
+            "${target}:$remoteLoRAStaging/$($item.StagingId).part"
+        )) -FailureMessage "Uploading local LoRA failed: $($item.RelativePath)" -Attempts 2 -DelaySeconds 5 -TimeoutSeconds 0 -Quiet
+        $verifyStageCommand = "python3 '$remoteLoRAInstaller' verify-stage '$remoteUploadDirectory/remote-config.json' '$loraRoot' '$remoteLoRAStaging' '$($item.StagingId)'"
+        Invoke-NativeCommandCheckedWithRetry -Command 'ssh' -Arguments ($automatedSshCommon + @(
+            '-T', '-n', '-p', [string]$endpoint.Port, $target, $verifyStageCommand
+        )) -FailureMessage "Verifying uploaded local LoRA failed: $($item.RelativePath)" -Attempts 2 -DelaySeconds 3 -TimeoutSeconds 0 -Quiet
+    }
+}
 
 Write-Host '[local 4/5] Running remote provisioning; model downloads can take a long time.' -ForegroundColor Cyan
 Write-Host 'Progress and downloaded sizes will be printed below. Interrupted downloads resume from .part files.' -ForegroundColor DarkCyan
@@ -186,9 +245,11 @@ try {
     $enabledCivitaiLoRAs = @($config.Anima.ManagedLoRAs | Where-Object { [bool]$_.Enabled -and [string]$_.Source -eq 'civitai' })
     if ($enabledCivitaiLoRAs.Count -gt 0) {
         $tokenEnvironmentVariable = [string]$config.Secrets.CivitaiTokenEnvironmentVariable
-        $civitaiToken = [Environment]::GetEnvironmentVariable($tokenEnvironmentVariable, 'Process')
+        $civitaiCredential = Get-CivitaiCredential -ProjectRoot $script:ProjectRoot -EnvironmentVariableName $tokenEnvironmentVariable
+        $civitaiToken = if ($civitaiCredential) { [string]$civitaiCredential.Value } else { $null }
         if ($civitaiToken) {
             if ($civitaiToken -notmatch '^[A-Za-z0-9._-]+$') { throw "$tokenEnvironmentVariable contains unsupported characters." }
+            Write-Host "Using Civitai API Key from $($civitaiCredential.Source) credential storage." -ForegroundColor DarkCyan
             try {
                 $localCivitaiSecret = New-RestrictedSecretFile -Value $civitaiToken
             } finally {
@@ -202,6 +263,9 @@ try {
                 '-T', '-n', '-p', [string]$endpoint.Port, $target,
                 "umask 077 && mv '$remoteUploadDirectory/.civitai-token.upload' '$remoteUploadDirectory/.civitai-token'"
             )) -FailureMessage 'Securing the temporary Civitai credential failed.' -Attempts 3 -DelaySeconds 3 -TimeoutSeconds 60 -Quiet
+        }
+        else {
+            Write-Warning 'No Civitai API Key is configured. Public downloads will be attempted; protected resources may return HTTP 401. Use ManageLoRA to save a Key.'
         }
     }
     Invoke-NativeCommandChecked -Command 'ssh' -Arguments ($automatedSshCommon + @(

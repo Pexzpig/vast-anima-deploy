@@ -7,6 +7,7 @@ $verifyScript = Get-Content -LiteralPath (Join-Path $projectRoot 'remote\verify-
 $localProvision = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\Provision-Instance.ps1') -Raw -Encoding UTF8
 $remoteCli = Get-Content -LiteralPath (Join-Path $projectRoot 'Open-VastRemoteCli.ps1') -Raw -Encoding UTF8
 $applicationConfigurator = Get-Content -LiteralPath (Join-Path $projectRoot 'remote\configure-application.py') -Raw -Encoding UTF8
+$localLoRAInstaller = Get-Content -LiteralPath (Join-Path $projectRoot 'remote\install-local-loras.py') -Raw -Encoding UTF8
 
 foreach ($expected in @(
     'stage_total=11',
@@ -56,6 +57,7 @@ foreach ($expected in @(
     'start-${service_name}.sh',
     '[download]',
     'verify-deployment.sh',
+    'install-local-loras.py',
     'restore supervisor'
 ) ) {
     if (-not $provisionScript.Contains($expected)) {
@@ -63,7 +65,7 @@ foreach ($expected in @(
     }
 }
 
-foreach ($expected in @('Base PyTorch environment', 'Forge Classic WebUI', 'ComfyUI', 'standard and hires workflows', 'Anima Turbo LoRA', 'Managed Anima LoRA', 'WebUI localization', 'VERSION_UID', 'WebUI extension', 'Supervisor service', 'health endpoint', 'Codex CLI')) {
+foreach ($expected in @('Base PyTorch environment', 'Forge Classic WebUI', 'ComfyUI', 'standard and hires workflows', 'Anima Turbo LoRA', 'Managed Anima LoRA', 'Project-local LoRA', 'WebUI localization', 'VERSION_UID', 'WebUI extension', 'Supervisor service', 'health endpoint', 'Codex CLI')) {
     if (-not $verifyScript.Contains($expected)) {
         throw "Remote verification is missing a required check: $expected"
     }
@@ -78,7 +80,13 @@ if (-not $localProvision.Contains('Uploading the remote verification script fail
     -not $localProvision.Contains('workflow_sha256') -or
     -not $localProvision.Contains('hires_workflow_file_name = [string]$config.Anima.HiresWorkflowFileName') -or
     -not $localProvision.Contains('managed_loras = @($config.Anima.ManagedLoRAs)') -or
+    -not $localProvision.Contains('local_loras = @($localLoRAs | ForEach-Object') -or
+    -not $localProvision.Contains('Get-LocalLoRAFiles') -or
+    -not $localProvision.Contains('Uploading local LoRA') -or
+    -not $localProvision.Contains('-TimeoutSeconds 0 -Quiet') -or
     -not $localProvision.Contains('CivitaiTokenEnvironmentVariable') -or
+    -not $localProvision.Contains('Get-CivitaiCredential') -or
+    -not $localProvision.Contains('Using Civitai API Key from') -or
     -not $localProvision.Contains('New-RestrictedSecretFile') -or
     -not $localProvision.Contains('Set-Acl -LiteralPath $path -AclObject $security') -or
     $localProvision.Contains('[System.IO.File]::SetAccessControl') -or
@@ -96,7 +104,13 @@ if (-not $localProvision.Contains('Uploading the remote verification script fail
     -not $localProvision.Contains('-Quiet')) {
     throw 'Local provisioning does not upload verification or display staged progress.'
 }
-if ($localProvision.Contains('?token=') -or $provisionScript.Contains('?token=')) {
+foreach ($expected in @('verify-stage', 'os.replace', 'shutil.copyfile', 'relative_path', 'staging_id', 'Local LoRA')) {
+    if (-not $localLoRAInstaller.Contains($expected)) {
+        throw "The local LoRA installer is missing expected behavior: $expected"
+    }
+}
+if ($localProvision.Contains('?token=') -or $provisionScript.Contains('?token=') -or
+    -not $provisionScript.Contains('save a Civitai API Key from the ManageLoRA menu')) {
     throw 'A Civitai token is being placed in a persisted or logged URL.'
 }
 foreach ($expected in @('build_standard_workflow', 'build_hires_workflow', 'configure_model_chain', 'LoraLoaderModelOnly', 'LatentUpscaleBy', 'Base hires refinement (Turbo excluded)', 'ResolutionSelector', 'prepare-webui', 'configure-webui', 'disabled_extensions', 'disable_all_extensions', 'verify-workflow')) {

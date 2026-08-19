@@ -137,8 +137,12 @@ download_file() {
     sleep 10
   done
   if ! wait "$curl_pid"; then
-    if [[ "$source" == 'civitai' && ! -s "$civitai_curl_config" ]]; then
-      echo 'Civitai download failed. If this resource requires login, set CIVITAI_API_TOKEN in the local PowerShell process and provision again.' >&2
+    if [[ "$source" == 'civitai' ]]; then
+      if [[ -s "$civitai_curl_config" ]]; then
+        echo 'Authenticated Civitai download failed. Re-enter or replace the Civitai API Key from the ManageLoRA menu, then provision again.' >&2
+      else
+        echo 'Civitai download failed. If this resource requires login, save a Civitai API Key from the ManageLoRA menu and provision again.' >&2
+      fi
     fi
     return 1
   fi
@@ -445,6 +449,12 @@ mkdir -p "$lora_root"
 while IFS=$'\t' read -r lora_name lora_url lora_sha lora_source; do
   download_file "$lora_url" "$lora_root/$lora_name" "$lora_sha" "$lora_source"
 done < <(jq -r '.anima.managed_loras[] | select(.Enabled == true) | [.Name, .Url, .Sha256, .Source] | @tsv' "$deploy_config")
+local_lora_installer="$secret_directory/remote/install-local-loras.py"
+if [[ ! -f "$local_lora_installer" ]]; then
+  echo "Local LoRA installer is missing: $local_lora_installer" >&2
+  exit 5
+fi
+"$base_python" "$local_lora_installer" install "$deploy_config" "$lora_root" "$secret_directory/local-loras"
 rm -f -- "$civitai_curl_config"
 
 stage 'Installing application workflow or baseline configuration'

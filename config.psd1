@@ -196,6 +196,7 @@
     Local = @{
         StatePath = 'state/deployment.json'
         GeneratedRemoteConfigPath = 'state/remote-config.json'
+        LoRADirectory = 'user-config/loras'
         RemoteUploadDirectory = '/tmp/anima-vast-deploy'
         ProvisionScriptPath = 'remote/provision.sh'
         CodexScriptPath = 'remote/configure-codex.sh'

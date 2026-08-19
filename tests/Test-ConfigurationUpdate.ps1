@@ -11,6 +11,7 @@ $config.Vast.Ssh.IdentityFile = 'C:\keys\custom-ed25519'
 $config.Vast.Ssh.ReadyTimeoutSeconds = 1234
 $config.Vast.Ssh.ReadyPollIntervalSeconds = 17
 $config.Local.RemoteUploadDirectory = '/tmp/custom-upload'
+$config.Local.LoRADirectory = 'user-config/custom-loras'
 $originalModelUrl = [string]$config.Anima.Models[0].Url
 
 $updated = Set-DeploymentSearchPreferences `
@@ -36,6 +37,7 @@ if ($updated.Codex.ProjectRoot -ne '/workspace/custom-project' -or
     $updated.Vast.Ssh.ReadyTimeoutSeconds -ne 1234 -or
     $updated.Vast.Ssh.ReadyPollIntervalSeconds -ne 17 -or
     $updated.Local.RemoteUploadDirectory -ne '/tmp/custom-upload' -or
+    $updated.Local.LoRADirectory -ne 'user-config/custom-loras' -or
     [string]$updated.Anima.Models[0].Url -ne $originalModelUrl) {
     throw 'Updating search preferences reset unrelated deployment configuration.'
 }
@@ -57,6 +59,7 @@ $forwardConfig.WebUI.Remove('TorchvisionVersion')
 $forwardConfig.WebUI.Remove('TorchCudaVersion')
 $forwardConfig.WebUI.Remove('TorchIndexUrl')
 $forwardConfig.Secrets.Remove('CivitaiTokenEnvironmentVariable')
+$forwardConfig.Local.Remove('LoRADirectory')
 $forwardConfig.Anima.Remove('WorkflowSha256')
 $forwardConfig.Anima.Remove('ManagedWorkflowFileName')
 $forwardConfig.Anima.Remove('HiresWorkflowFileName')
@@ -83,6 +86,7 @@ if ($forwardConfig.ComfyUI.TorchVersion -ne '2.11.0' -or
     $forwardConfig.WebUI.TorchCudaVersion -ne '12.8' -or
     $forwardConfig.WebUI.TorchIndexUrl -ne 'https://download.pytorch.org/whl/cu128' -or
     $forwardConfig.Secrets.CivitaiTokenEnvironmentVariable -ne 'CIVITAI_API_TOKEN' -or
+    $forwardConfig.Local.LoRADirectory -ne 'user-config/loras' -or
     [string]$forwardConfig.Anima.WorkflowSha256 -ne [string]$template.Anima.WorkflowSha256 -or
     [string]$forwardConfig.Anima.WorkflowUrl -ne [string]$template.Anima.WorkflowUrl -or
     $forwardConfig.Anima.ManagedWorkflowFileName -ne 'image_anima_base_v1.managed.json' -or
@@ -133,6 +137,8 @@ if (@($forwardConfig.WebUI.Extensions).Count -ne 1 -or $forwardConfig.WebUI.Exte
     -not [bool]$forwardConfig.Anima.ManagedLoRAs[0].AutoApplyInComfyUI -or
     $forwardConfig.Anima.ManagedLoRAs[0].BaseModel -notmatch 'Anima' -or
     @($forwardConfig.Anima.ManagedLoRAs[0].TriggerWords).Count -ne 0 -or
+    $forwardConfig.Anima.ManagedLoRAs[0].OriginalFileName -ne 'custom-character.safetensors' -or
+    $null -ne $forwardConfig.Anima.ManagedLoRAs[0].FileId -or
     [double]$forwardConfig.Anima.Hires.Scale -ne 1.75) {
     throw 'Existing workflow or extension feature settings were overwritten by defaults.'
 }
@@ -148,6 +154,8 @@ $existingCivitaiEntry = $existingCivitaiConfig.Anima.ManagedLoRAs[0]
 if ($existingCivitaiEntry.Source -ne 'civitai' -or
     $existingCivitaiEntry.SourcePageUrl -ne $existingCivitaiUrl -or
     [int64]$existingCivitaiEntry.ModelVersionId -ne 987654 -or
+    $existingCivitaiEntry.OriginalFileName -ne 'existing-civitai.safetensors' -or
+    $null -ne $existingCivitaiEntry.FileId -or
     -not [bool]$existingCivitaiEntry.AutoApplyInComfyUI) {
     throw 'An existing Civitai entry was not upgraded without changing its installation or workflow behavior.'
 }

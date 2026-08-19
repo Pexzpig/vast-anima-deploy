@@ -4,6 +4,10 @@ param()
 . (Join-Path $PSScriptRoot '..\scripts\Common.ps1')
 
 $config = Get-DeployConfig -ConfigPath 'config.psd1'
+$gitIgnore = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.gitignore') -Raw -Encoding UTF8
+if (-not $gitIgnore.Contains('user-config/civitai-token.secret')) {
+    throw 'The encrypted local Civitai credential is not ignored by Git.'
+}
 if ([string]$config.Secrets.CivitaiTokenEnvironmentVariable -ne 'CIVITAI_API_TOKEN') {
     throw 'The Civitai token environment variable is not configured safely.'
 }

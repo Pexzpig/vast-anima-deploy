@@ -39,6 +39,8 @@ try {
         SourcePageUrl = ''
         ModelId = $null
         ModelVersionId = $null
+        FileId = $null
+        OriginalFileName = 'valid-character.safetensors'
         BaseModel = 'Anima (user confirmed)'
         TriggerWords = @('valid trigger')
         AutoApplyInComfyUI = $false
@@ -60,12 +62,14 @@ try {
     Test-ConfigurationRejected { param($c) $c.Anima.ManualLoRASlots = 1 } 'missing style manual slot'
     Test-ConfigurationRejected { param($c) $c.Vast.Ssh.ReadyTimeoutSeconds = 30 } 'SSH readiness timeout below 60 seconds'
     Test-ConfigurationRejected { param($c) $c.Vast.Ssh.ReadyPollIntervalSeconds = 0 } 'SSH readiness polling interval below one second'
+    Test-ConfigurationRejected { param($c) $c.Local.LoRADirectory = '../outside' } 'local LoRA directory outside project root'
     Test-ConfigurationRejected {
         param($c)
         $c.Anima.ManagedLoRAs = @(@{
             Name = 'token.safetensors'; Kind = 'style'; Url = 'https://civitai.com/api/download/models/123?token=secret'
             Sha256 = ('d' * 64) -join ''; Strength = 1.0; Enabled = $true; Source = 'civitai'
             SourcePageUrl = 'https://civitai.com/models/1?modelVersionId=123'; ModelId = 1; ModelVersionId = 123
+            FileId = 456; OriginalFileName = 'token.safetensors'
             BaseModel = 'Anima'; TriggerWords = @(); AutoApplyInComfyUI = $false
         })
     } 'token-bearing Civitai URL'

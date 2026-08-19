@@ -2,6 +2,7 @@
 param([string]$ConfigPath)
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
+Import-Module (Join-Path $PSScriptRoot 'LoRA-Configuration.psm1') -Force
 if (-not $ConfigPath) { $ConfigPath = Join-Path $script:ProjectRoot 'user-config\deployment.json' }
 $config = Get-DeployConfig -ConfigPath $ConfigPath
 
@@ -180,6 +181,12 @@ foreach ($lora in @($config.Anima.ManagedLoRAs)) {
         if ($null -eq $sourcePageUri -or $sourcePageUri.Host -notin @('civitai.com', 'www.civitai.com')) { $errors.Add("Managed Civitai LoRA '$loraName' must use a civitai.com source page URL.") }
         if ([int64]$lora.ModelVersionId -le 0) { $errors.Add("Managed Civitai LoRA '$loraName' requires a fixed ModelVersionId.") }
         if ($null -ne $lora.ModelId -and [int64]$lora.ModelId -le 0) { $errors.Add("Managed Civitai LoRA '$loraName' has an invalid ModelId.") }
+        if ($lora.ContainsKey('FileId') -and $null -ne $lora.FileId -and [int64]$lora.FileId -le 0) { $errors.Add("Managed Civitai LoRA '$loraName' has an invalid FileId.") }
+    }
+    if (-not $lora.ContainsKey('OriginalFileName') -or [string]::IsNullOrWhiteSpace([string]$lora.OriginalFileName) -or
+        ([string]$lora.OriginalFileName).Length -gt 255 -or
+        @(([string]$lora.OriginalFileName).ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0) {
+        $errors.Add("Managed Anima LoRA '$loraName' has an invalid OriginalFileName.")
     }
     if (-not $managedLoRANames.Add($loraName) -or $loraName -eq [string]$turbo.Name) { $errors.Add("Duplicate managed Anima LoRA filename: $loraName") }
 }
@@ -210,6 +217,7 @@ $provisionScriptPath = if ($config.Local.ContainsKey('ProvisionScriptPath')) { [
 $codexScriptPath = if ($config.Local.ContainsKey('CodexScriptPath')) { [string]$config.Local.CodexScriptPath } else { '' }
 $verifyScriptPath = 'remote/verify-deployment.sh'
 $applicationConfiguratorPath = 'remote/configure-application.py'
+$localLoRADirectory = if ($config.Local.ContainsKey('LoRADirectory')) { [string]$config.Local.LoRADirectory } else { '' }
 if (-not $provisionScriptPath) { $errors.Add('Local.ProvisionScriptPath is required.') }
 if (-not $codexScriptPath) { $errors.Add('Local.CodexScriptPath is required.') }
 if ($provisionScriptPath -and -not (Test-Path -LiteralPath (Resolve-ProjectPath -Path $provisionScriptPath) -PathType Leaf)) { $errors.Add("Provision script not found: $provisionScriptPath") }
@@ -217,6 +225,12 @@ if ($codexScriptPath -and -not (Test-Path -LiteralPath (Resolve-ProjectPath -Pat
 if (-not (Test-Path -LiteralPath (Resolve-ProjectPath -Path $verifyScriptPath) -PathType Leaf)) { $errors.Add("Verification script not found: $verifyScriptPath") }
 if (-not (Test-Path -LiteralPath (Resolve-ProjectPath -Path $applicationConfiguratorPath) -PathType Leaf)) { $errors.Add("Application configurator not found: $applicationConfiguratorPath") }
 if ([string]$config.Local.RemoteUploadDirectory -notmatch '^/[A-Za-z0-9._/-]+$') { $errors.Add('Local.RemoteUploadDirectory contains unsupported shell characters.') }
+if (-not $localLoRADirectory) {
+    $errors.Add('Local.LoRADirectory is required.')
+} else {
+    try { Resolve-LocalLoRADirectory -ProjectRoot $script:ProjectRoot -RelativePath $localLoRADirectory | Out-Null }
+    catch { $errors.Add("Local.LoRADirectory is invalid: $($_.Exception.Message)") }
+}
 
 if ($errors.Count -gt 0) {
     $errors | ForEach-Object { Write-Error $_ }

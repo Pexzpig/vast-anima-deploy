@@ -132,9 +132,21 @@ LoRA 清单中的启用项会安装到 `/workspace/sd-webui-forge-classic/models
 .\Start-VastAnima.ps1 -Action ManageLoRA
 ```
 
-Civitai 模型页面未指定版本时，脚本会列出版本供选择并固定具体版本，不会在以后自动切换到最新版。模型必须是 Anima LoRA，下载文件必须为 SafeTensor 且具有 SHA-256。普通 HTTPS 直链需要手动提供文件名和 SHA-256。
+Civitai 模型页面未指定版本时，脚本会列出版本供选择并固定具体版本，不会在以后自动切换到最新版。模型必须是 Anima LoRA，下载文件必须为 SafeTensor 且具有 SHA-256。脚本兼容 Civitai 当前的 `metadata.format` 字段；链接末尾误带的中英文标点会被清理，含空格、括号或 Unicode 的原始文件名会转换为安全名称并显示映射。普通 HTTPS 直链仍需手动提供文件名和 SHA-256。
 
-需要登录的 Civitai 资源可在当前 PowerShell 进程中设置令牌，令牌输入不会显示在屏幕上：
+例如以下链接可以直接选择“添加 Civitai LoRA”：
+
+```text
+https://civitai.com/models/2626310/748cm-style-or-krea-2-anima?modelVersionId=2948641
+```
+
+它会固定版本和文件 ID，并将原文件 `748cm_TA_EP4 (1).safetensors` 安装为 `748cm_TA_EP4_1.safetensors`；触发词 `@748cm_style` 会记录在本地清单中，但不会自动写入提示词。
+
+需要登录的 Civitai 资源，在“管理 LoRA 清单”中选择“录入 Civitai API Key（Anima LoRA 下载）”。输入不会显示；脚本会用清单中的 Civitai 下载地址验证认证，然后通过 Windows DPAPI 按当前用户加密保存到 ignored 的 `user-config/civitai-token.secret`，并限制文件 ACL。重新执行 Provision 时会自动读取、临时上传到远端并在成功或失败后清理。
+
+API Key 不会写入 `deployment.json`、state、下载 URL 或部署日志。菜单同时支持查看是否已配置以及清除凭据；其他 Windows 用户不能解密该文件。遇到 HTTP 401 时重新录入有效 Key，然后直接重试 Provision，不需要重建实例。
+
+环境变量仍作为未保存本地凭据时的高级回退方式：
 
 ```powershell
 $secret = Read-Host 'Civitai API token' -AsSecureString
@@ -142,7 +154,15 @@ $credential = New-Object System.Management.Automation.PSCredential('civitai', $s
 $env:CIVITAI_API_TOKEN = $credential.GetNetworkCredential().Password
 ```
 
-令牌不会写入 `deployment.json`、state、下载 URL 或部署日志。关闭当前 PowerShell 后环境变量失效。修改清单不会启动实例或立即操作远端；实例运行时需执行 `Provision`。
+关闭当前 PowerShell 后环境变量失效；已加密保存的本机凭据仍然有效，并优先于环境变量。修改清单或凭据不会启动实例或立即操作远端；实例运行时需执行 `Provision`。
+
+### 项目内本地 LoRA 目录
+
+默认目录为 `user-config/loras`。在“管理 LoRA 清单”中可以设置为项目根目录内的其他相对目录，也可以直接打开目录。目录及其子目录中的所有非空 `.safetensors` 会在 Provision 时递归扫描、计算 SHA-256，并通过 SCP 上传；相对子目录结构会保留。
+
+本地文件只安装到当前应用，不会自动进入 ComfyUI 托管工作流或 WebUI 提示词。远端已有同路径且哈希相同时跳过上传；哈希不同时由本地文件原子覆盖且不保留备份。从本地目录移除文件不会删除远端副本。Turbo 或 URL 托管 LoRA 与本地目标重名时会在上传前失败，需先重命名。
+
+模型文件和上传临时文件已被 Git 忽略，不应提交到仓库。大型 SCP 上传不设固定分钟超时，但中断文件不支持续传；重新执行 Provision 时，已安装且哈希正确的文件会跳过，未完成文件会重新上传。
 
 SSH/tmux 窗口是终端而不是文件管理器，不能直接拖拽上传 `.safetensors`；拖拽到 PowerShell 通常只会粘贴本地路径。先查看 SSH endpoint：
 

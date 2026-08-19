@@ -296,6 +296,11 @@ if ((Test-Path -LiteralPath $resolvedConfigPath) -and -not $Force -and $UseDefau
 }
 
 Save-JsonFile -Path $relativeConfigPath -Value $config | Out-Null
+Import-Module (Join-Path $PSScriptRoot 'LoRA-Configuration.psm1') -Force
+$localLoRADirectory = Resolve-LocalLoRADirectory `
+    -ProjectRoot $script:ProjectRoot `
+    -RelativePath ([string]$config.Local.LoRADirectory) `
+    -Create
 
 Write-Host ''
 Write-Host '初始化完成。' -ForegroundColor Green
@@ -304,6 +309,7 @@ Write-Host "默认应用：$ApplicationType"
 Write-Host "GPU：$($GpuNames -join ', ')"
 Write-Host ('价格上限：${0}/小时' -f $MaxHourlyUsd.ToString('0.####', $script:InvariantCulture))
 Write-Host "持久卷：$(if ($config.Vast.Volume.Enabled) { "$VolumeSizeGb GB" } else { '关闭' })"
+Write-Host "本地 LoRA 目录：$localLoRADirectory"
 
 [pscustomobject]@{
     ApplicationType = $ApplicationType

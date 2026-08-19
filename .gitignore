@@ -5,6 +5,10 @@ state/*.tmp
 # Local files left by pre-single-configuration installations are inert.
 profiles/
 user-config/*.json
+user-config/civitai-token.secret
 *.key
 *.pem
 .env
+*.safetensors
+*.safetensors.part
+*.safetensors.upload

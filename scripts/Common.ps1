@@ -160,6 +160,9 @@ function Add-CurrentFeatureConfigurationDefaults {
     if (-not $Config.Secrets.ContainsKey('CivitaiTokenEnvironmentVariable')) {
         $Config.Secrets.CivitaiTokenEnvironmentVariable = [string]$Template.Secrets.CivitaiTokenEnvironmentVariable
     }
+    if (-not $Config.Local.ContainsKey('LoRADirectory')) {
+        $Config.Local.LoRADirectory = [string]$Template.Local.LoRADirectory
+    }
     foreach ($lora in @($Config.Anima.ManagedLoRAs)) {
         if (-not $lora.ContainsKey('Source')) {
             $lora.Source = if ([string]$lora.Url -match '^https://(?:www\.)?civitai\.com/') { 'civitai' } else { 'direct' }
@@ -171,6 +174,8 @@ function Add-CurrentFeatureConfigurationDefaults {
         if (-not $lora.ContainsKey('ModelVersionId')) {
             $lora.ModelVersionId = if ([string]$lora.Url -match '/api/download/models/(\d+)') { [int64]$Matches[1] } else { $null }
         }
+        if (-not $lora.ContainsKey('FileId')) { $lora.FileId = $null }
+        if (-not $lora.ContainsKey('OriginalFileName')) { $lora.OriginalFileName = [string]$lora.Name }
         if (-not $lora.ContainsKey('BaseModel')) { $lora.BaseModel = 'Anima' }
         if (-not $lora.ContainsKey('TriggerWords')) { $lora.TriggerWords = @() }
         if (-not $lora.ContainsKey('AutoApplyInComfyUI')) { $lora.AutoApplyInComfyUI = $true }

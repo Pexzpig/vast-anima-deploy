@@ -124,8 +124,101 @@ function Show-LoRAList {
         Write-Host ("    类型/来源：{0} / {1}    启用：{2}    ComfyUI 自动应用：{3}" -f $item.Kind, $item.Source, $item.Enabled, $apply)
         Write-Host ("    基础模型：{0}    推荐权重：{1}    状态：{2}" -f $item.BaseModel, $item.Strength, $itemStatus)
         Write-Host ("    触发词：{0}" -f $triggers)
+        if ($item.OriginalFileName -and [string]$item.OriginalFileName -ne $itemName) {
+            Write-Host ("    Civitai 原文件名：{0} -> {1}" -f $item.OriginalFileName, $itemName) -ForegroundColor DarkGray
+        }
         if ($item.SourcePageUrl) { Write-Host ("    来源：{0}" -f $item.SourcePageUrl) -ForegroundColor DarkGray }
     }
+}
+
+function Get-LocalLoRAInstallationStatus {
+    param([object[]]$Files)
+
+    $statuses = @{}
+    foreach ($file in @($Files)) { $statuses[[string]$file.RelativePath] = '等待 Provision/未检查' }
+    if (@($Files).Count -eq 0) { return $statuses }
+    try {
+        $summary = Get-LocalDeploymentSummary -Config $config
+        if (-not $summary.Exists -or $summary.InstanceStatus -ne 'running') { return $statuses }
+        $application = Get-DeploymentApplication -Config $config -State $summary.State
+        $loraRoot = if ($application.Type -eq 'comfyui') { "$($config.ComfyUI.Root)/models/loras" } else { "$($config.WebUI.Root)/models/Lora" }
+        if ($loraRoot -notmatch '^/[A-Za-z0-9._/-]+$') { return $statuses }
+        $payload = @($Files | ForEach-Object { [ordered]@{ RelativePath = $_.RelativePath; Sha256 = $_.Sha256 } }) | ConvertTo-Json -Depth 5 -Compress
+        $payload64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
+        $statusScript = @'
+import base64, hashlib, json, pathlib, sys
+items = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
+root = pathlib.Path(sys.argv[2]).resolve()
+for item in items:
+    destination = (root / pathlib.PurePosixPath(item["RelativePath"])).resolve()
+    if root != destination and root not in destination.parents:
+        state = "invalid"
+    elif not destination.is_file():
+        state = "missing"
+    else:
+        digest = hashlib.sha256()
+        with destination.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        state = "installed" if digest.hexdigest() == item["Sha256"] else "mismatch"
+    print(item["RelativePath"] + "\t" + state)
+'@
+        $script64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($statusScript))
+        $endpoint = Get-VastSshEndpoint -Config $config -InstanceId ([int64]$summary.State.instance_id)
+        $remoteCommand = "printf '%s' '$script64' | base64 -d | python3 - '$payload64' '$loraRoot'"
+        $arguments = @(Get-SshCommonArguments -Config $config) + @(
+            '-o', 'LogLevel=QUIET', '-T', '-n', '-p', [string]$endpoint.Port,
+            "$($endpoint.User)@$($endpoint.Host)", $remoteCommand
+        )
+        $result = Invoke-NativeCommandCapture -Command 'ssh' -Arguments $arguments -TimeoutSeconds 120
+        if ($result.ExitCode -eq 0) {
+            foreach ($line in $result.Output) {
+                $parts = @($line -split "`t", 2)
+                if ($parts.Count -ne 2) { continue }
+                $status = switch ($parts[1]) {
+                    'installed' { '已安装且哈希正确' }
+                    'mismatch' { '远端同名文件将被覆盖' }
+                    'missing' { '远端缺失' }
+                    default { '路径无效' }
+                }
+                $statuses[$parts[0]] = $status
+            }
+        }
+    } catch {
+        Write-Verbose "Could not query local LoRA status: $($_.Exception.Message)"
+    }
+    return $statuses
+}
+
+function Show-LocalLoRAList {
+    $directory = Resolve-LocalLoRADirectory -ProjectRoot $script:ProjectRoot -RelativePath ([string]$config.Local.LoRADirectory) -Create
+    $files = @(Get-LocalLoRAFiles -ProjectRoot $script:ProjectRoot -RelativeDirectory ([string]$config.Local.LoRADirectory))
+    Write-Host ''
+    Write-Host "本地 LoRA 目录：$directory" -ForegroundColor Cyan
+    Write-Host '本地文件仅安装，不会自动加入 ComfyUI 工作流或 WebUI 提示词。' -ForegroundColor DarkGray
+    if ($files.Count -eq 0) { Write-Host '  未发现 .safetensors 文件。' -ForegroundColor DarkGray; return }
+    $statuses = Get-LocalLoRAInstallationStatus -Files $files
+    for ($index = 0; $index -lt $files.Count; $index++) {
+        $file = $files[$index]
+        Write-Host ("  [{0}] {1}  {2:N1} MB  {3}" -f ($index + 1), $file.RelativePath, ($file.SizeBytes / 1MB), $statuses[[string]$file.RelativePath])
+    }
+}
+
+function Show-CivitaiCredentialStatus {
+    $tokenName = [string]$config.Secrets.CivitaiTokenEnvironmentVariable
+    $storedPath = Get-CivitaiCredentialPath -ProjectRoot $script:ProjectRoot
+    $storedState = '未保存'
+    if (Test-Path -LiteralPath $storedPath -PathType Leaf) {
+        try {
+            Get-CivitaiStoredCredential -ProjectRoot $script:ProjectRoot | Out-Null
+            $storedState = '已加密保存且可读取'
+        } catch {
+            $storedState = '文件存在但当前用户无法解密，请重新录入'
+        }
+    }
+    $environmentState = if ([Environment]::GetEnvironmentVariable($tokenName, 'Process')) { '当前进程已设置' } else { '未设置' }
+    Write-Host "Civitai API Key：本机=$storedState；$tokenName=$environmentState" -ForegroundColor DarkCyan
+    Write-Host '保存的凭据优先用于 Civitai API 和远端下载，密钥内容不会显示。' -ForegroundColor DarkGray
 }
 
 function Save-LoRAConfig {
@@ -149,7 +242,8 @@ function Add-CivitaiLoRA {
     $kind = Read-LoRAKind
     $strength = Read-LoRAStrength
     $tokenName = [string]$config.Secrets.CivitaiTokenEnvironmentVariable
-    $token = [Environment]::GetEnvironmentVariable($tokenName, 'Process')
+    $credential = Get-CivitaiCredential -ProjectRoot $script:ProjectRoot -EnvironmentVariableName $tokenName
+    $token = if ($credential) { [string]$credential.Value } else { $null }
 
     $versionSelector = {
         param($Versions)
@@ -172,8 +266,53 @@ function Add-CivitaiLoRA {
         return @($Files)[$choice - 1]
     }
     $entry = Resolve-CivitaiLoRAEntry -Url $url -Kind $kind -Strength $strength -Token $token `
-        -VersionSelector $versionSelector -FileSelector $fileSelector
+        -VersionSelector $versionSelector -FileSelector $fileSelector `
+        -ExistingNames (@([string]$config.Anima.Turbo.Name) + @($config.Anima.ManagedLoRAs | ForEach-Object { [string]$_.Name }))
     Add-LoRAEntry -Entry $entry
+}
+
+function Set-CivitaiApiKey {
+    Write-Host 'API Key 只会以当前 Windows 用户可解密的形式保存在本机，不会写入 deployment.json。' -ForegroundColor DarkCyan
+    $secureToken = Read-Host '输入 Civitai API Key' -AsSecureString
+    $civitaiEntries = @($config.Anima.ManagedLoRAs | Where-Object { [string]$_.Source -eq 'civitai' })
+    if ($civitaiEntries.Count -gt 0) {
+        $downloadUrl = [string]$civitaiEntries[0].Url
+        Test-CivitaiDownloadCredential -SecureToken $secureToken -DownloadUrl $downloadUrl | Out-Null
+        Write-Host 'Civitai 下载认证验证成功。' -ForegroundColor Green
+    } else {
+        Write-Warning '清单中还没有 Civitai LoRA，暂时只能检查 Key 格式；添加 LoRA 后可重新录入以验证下载权限。'
+    }
+    $path = Set-CivitaiStoredCredential -ProjectRoot $script:ProjectRoot -SecureToken $secureToken
+    Write-Host "Civitai API Key 已加密保存：$path" -ForegroundColor Green
+    Write-Host '重新执行 Provision 时会自动安全上传该凭据。' -ForegroundColor Yellow
+}
+
+function Clear-CivitaiApiKey {
+    Write-Host '这会删除本机保存的 Civitai API Key，并清除当前 PowerShell 进程中的对应环境变量。' -ForegroundColor Yellow
+    if ((Read-Host '输入 CLEAR 确认').Trim() -cne 'CLEAR') { Write-Host '已取消。'; return }
+    Remove-CivitaiStoredCredential -ProjectRoot $script:ProjectRoot
+    [Environment]::SetEnvironmentVariable([string]$config.Secrets.CivitaiTokenEnvironmentVariable, $null, 'Process')
+    Write-Host 'Civitai API Key 已清除。' -ForegroundColor Green
+}
+
+function Set-LocalLoRADirectory {
+    Write-Host "当前目录：$($config.Local.LoRADirectory)"
+    $relativePath = (Read-Host '输入项目内相对目录').Trim()
+    if (-not $relativePath) { Write-Host '已取消。'; return }
+    $resolved = Resolve-LocalLoRADirectory -ProjectRoot $script:ProjectRoot -RelativePath $relativePath -Create
+    $config.Local.LoRADirectory = $relativePath.Trim().TrimEnd([char[]]'\/').Replace('\', '/')
+    Save-LoRAConfig
+    Write-Host "本地 LoRA 目录：$resolved" -ForegroundColor Green
+}
+
+function Open-LocalLoRADirectory {
+    $resolved = Resolve-LocalLoRADirectory -ProjectRoot $script:ProjectRoot -RelativePath ([string]$config.Local.LoRADirectory) -Create
+    if ($env:OS -eq 'Windows_NT') {
+        Invoke-Item -LiteralPath $resolved
+        Write-Host "已打开：$resolved" -ForegroundColor Green
+    } else {
+        Write-Host "本地 LoRA 目录：$resolved"
+    }
 }
 
 function Add-DirectLoRA {
@@ -219,22 +358,37 @@ function Remove-LoRA {
     Save-LoRAConfig
 }
 
-if ($Operation -eq 'List') { Show-LoRAList -CurrentConfig $config; exit 0 }
+if ($Operation -eq 'List') {
+    Show-CivitaiCredentialStatus
+    Show-LoRAList -CurrentConfig $config
+    Show-LocalLoRAList
+    exit 0
+}
 
 while ($true) {
+    Show-CivitaiCredentialStatus
     Show-LoRAList -CurrentConfig $config
+    Show-LocalLoRAList
     Write-Host ''
     Write-Host '  1. 添加 Civitai LoRA'
     Write-Host '  2. 添加公开 HTTPS 直链'
     Write-Host '  3. 启用/停用条目'
     Write-Host '  4. 从清单移除（不删除远端文件）'
+    Write-Host '  5. 设置本地 LoRA 目录'
+    Write-Host '  6. 打开本地 LoRA 目录'
+    Write-Host '  7. 录入 Civitai API Key（Anima LoRA 下载）'
+    Write-Host '  8. 清除 Civitai API Key'
     Write-Host '  0. 返回主菜单'
-    $choice = Read-ChoiceNumber -Prompt '请选择操作' -Minimum 0 -Maximum 4
+    $choice = Read-ChoiceNumber -Prompt '请选择操作' -Minimum 0 -Maximum 8
     switch ($choice) {
         0 { exit 0 }
         1 { Add-CivitaiLoRA }
         2 { Add-DirectLoRA }
         3 { Toggle-LoRA }
         4 { Remove-LoRA }
+        5 { Set-LocalLoRADirectory }
+        6 { Open-LocalLoRADirectory }
+        7 { Set-CivitaiApiKey }
+        8 { Clear-CivitaiApiKey }
     }
 }

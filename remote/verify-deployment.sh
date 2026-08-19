@@ -193,6 +193,15 @@ while IFS=$'\t' read -r lora_name lora_sha; do
   fi
 done < <(jq -r '.anima.managed_loras[] | select(.Enabled == true) | [.Name, .Sha256] | @tsv' "$deploy_config")
 
+local_lora_installer="$(dirname "$0")/install-local-loras.py"
+if [[ -f "$local_lora_installer" ]] &&
+  "$base_python" "$local_lora_installer" verify "$deploy_config" "$lora_root" "$(dirname "$deploy_config")/local-loras"; then
+  local_lora_count=$(jq -r '.anima.local_loras | length' "$deploy_config" 2>/dev/null || echo 0)
+  ok "Project-local LoRA files ($local_lora_count)"
+else
+  fail 'Project-local LoRA files'
+fi
+
 if [[ -s "$project_root/records/anima-baseline.json" ]]; then
   ok "Baseline record $project_root/records/anima-baseline.json"
 else
