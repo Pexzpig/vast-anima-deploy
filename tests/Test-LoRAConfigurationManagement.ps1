@@ -2,6 +2,12 @@
 param()
 
 Import-Module (Join-Path $PSScriptRoot '..\scripts\LoRA-Configuration.psm1') -Force
+$loraModule = Get-Module LoRA-Configuration
+$missingResponseStatus = & $loraModule {
+    try { throw 'HTTP exception without a Response property' }
+    catch { Get-HttpStatusCodeFromErrorRecord -ErrorRecord $_ }
+}
+if ($null -ne $missingResponseStatus) { throw 'An HTTP error without Response unexpectedly produced a status code.' }
 
 $modelResponse = [pscustomobject]@{
     id = 101
@@ -166,6 +172,14 @@ $previousCredentialEnvironment = [Environment]::GetEnvironmentVariable($credenti
 try {
     $testToken = 'test_civitai_key-12345'
     $secureToken = ConvertTo-SecureString -String $testToken -AsPlainText -Force
+    if (-not (Test-CivitaiDownloadAccess -DownloadUrl 'https://civitai.com/api/download/models/202' -RequestInvoker {
+        param($Uri, $Token)
+        if ($Token) { throw 'Anonymous Civitai preflight unexpectedly received a credential.' }
+        return 302
+    })) { throw 'An anonymously accessible Civitai download was rejected.' }
+    Assert-LoRARejected {
+        Test-CivitaiDownloadAccess -DownloadUrl 'https://civitai.com/api/download/models/202' -RequestInvoker { return 401 }
+    } 'protected Civitai download without an API Key'
     if (-not (Test-CivitaiDownloadCredential -SecureToken $secureToken -DownloadUrl 'https://civitai.com/api/download/models/202' -RequestInvoker {
         param($Uri, $Token)
         if ($Uri -ne 'https://civitai.com/api/download/models/202' -or $Token -ne 'test_civitai_key-12345') { throw 'Credential validation leaked or changed its inputs.' }

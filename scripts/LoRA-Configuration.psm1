@@ -15,6 +15,17 @@ function Get-LoRAProperty {
     return $Default
 }
 
+function Get-HttpStatusCodeFromErrorRecord {
+    param($ErrorRecord)
+
+    if ($null -eq $ErrorRecord -or $null -eq $ErrorRecord.Exception) { return $null }
+    $responseProperty = $ErrorRecord.Exception.PSObject.Properties['Response']
+    if ($null -eq $responseProperty -or $null -eq $responseProperty.Value) { return $null }
+    $statusProperty = $responseProperty.Value.PSObject.Properties['StatusCode']
+    if ($null -eq $statusProperty -or $null -eq $statusProperty.Value) { return $null }
+    return [int]$statusProperty.Value
+}
+
 function Invoke-CivitaiApiRequest {
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
@@ -29,8 +40,7 @@ function Invoke-CivitaiApiRequest {
         return Invoke-RestMethod -Uri $Uri -Headers $headers -Method Get -TimeoutSec 45 -UserAgent 'vast-anima-deploy/1'
     }
     catch {
-        $statusCode = $null
-        if ($_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode }
+        $statusCode = Get-HttpStatusCodeFromErrorRecord -ErrorRecord $_
         if ($statusCode -in @(401, 403)) {
             throw "Civitai API refused access ($statusCode). Save a Civitai API Key from ManageLoRA, or set CIVITAI_API_TOKEN in the current PowerShell process, and retry."
         }
@@ -139,6 +149,59 @@ function Remove-CivitaiStoredCredential {
     if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force }
 }
 
+function Test-CivitaiDownloadAccess {
+    param(
+        [Parameter(Mandatory = $true)][string]$DownloadUrl,
+        [string]$Token,
+        [scriptblock]$RequestInvoker
+    )
+
+    $uri = $null
+    if (-not [Uri]::TryCreate($DownloadUrl, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne 'https' -or $uri.Host -notin @('civitai.com', 'www.civitai.com')) {
+        throw 'Civitai download validation requires a civitai.com HTTPS download URL.'
+    }
+    if ($Token) { Assert-CivitaiTokenValue -Token $Token }
+    if ($RequestInvoker) { $statusCode = [int](& $RequestInvoker $uri.AbsoluteUri $Token) }
+    else {
+        Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+        $handler = $null
+        $client = $null
+        $request = $null
+        $response = $null
+        try {
+            $handler = [System.Net.Http.HttpClientHandler]::new()
+            $handler.AllowAutoRedirect = $false
+            $client = [System.Net.Http.HttpClient]::new($handler)
+            $client.Timeout = [TimeSpan]::FromSeconds(45)
+            $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $uri)
+            $request.Headers.Range = [System.Net.Http.Headers.RangeHeaderValue]::new(0, 0)
+            [void]$request.Headers.UserAgent.ParseAdd('vast-anima-deploy/1')
+            if ($Token) {
+                $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $Token)
+            }
+            $response = $client.SendAsync(
+                $request,
+                [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead
+            ).GetAwaiter().GetResult()
+            $statusCode = [int]$response.StatusCode
+        } catch {
+            throw "Could not validate Civitai download access. $($_.Exception.GetBaseException().Message)"
+        } finally {
+            if ($response) { $response.Dispose() }
+            if ($request) { $request.Dispose() }
+            if ($client) { $client.Dispose() }
+            if ($handler) { $handler.Dispose() }
+        }
+    }
+    if ($statusCode -in @(200, 206, 301, 302, 303, 307, 308)) { return $true }
+    if ($statusCode -in @(401, 403)) {
+        if ($Token) { throw "Civitai rejected the API Key with HTTP $statusCode." }
+        throw "Civitai download requires an API Key (HTTP $statusCode). Save it from ManageLoRA and retry Provision."
+    }
+    throw "Civitai download validation returned unexpected HTTP $statusCode."
+}
+
 function Test-CivitaiDownloadCredential {
     param(
         [Parameter(Mandatory = $true)][Security.SecureString]$SecureToken,
@@ -146,34 +209,12 @@ function Test-CivitaiDownloadCredential {
         [scriptblock]$RequestInvoker
     )
 
-    $uri = $null
-    if (-not [Uri]::TryCreate($DownloadUrl, [UriKind]::Absolute, [ref]$uri) -or
-        $uri.Scheme -ne 'https' -or $uri.Host -notin @('civitai.com', 'www.civitai.com')) {
-        throw 'Civitai credential validation requires a civitai.com HTTPS download URL.'
-    }
     $token = ConvertFrom-CivitaiSecureString -SecureValue $SecureToken
     try {
-        Assert-CivitaiTokenValue -Token $token
-        if ($RequestInvoker) { $statusCode = [int](& $RequestInvoker $uri.AbsoluteUri $token) }
-        else {
-            try {
-                $response = Invoke-WebRequest -Uri $uri.AbsoluteUri -Method Get -Headers @{
-                    Authorization = "Bearer $token"
-                    Range = 'bytes=0-0'
-                } `
-                    -MaximumRedirection 0 -TimeoutSec 45 -UserAgent 'vast-anima-deploy/1'
-                $statusCode = [int]$response.StatusCode
-            } catch {
-                $statusCode = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-                if ($statusCode -eq 0) { throw "Could not validate the Civitai API Key. $($_.Exception.Message)" }
-            }
-        }
+        return Test-CivitaiDownloadAccess -DownloadUrl $DownloadUrl -Token $token -RequestInvoker $RequestInvoker
     } finally {
         $token = $null
     }
-    if ($statusCode -in @(200, 206, 301, 302, 303, 307, 308)) { return $true }
-    if ($statusCode -in @(401, 403)) { throw "Civitai rejected the API Key with HTTP $statusCode." }
-    throw "Civitai credential validation returned unexpected HTTP $statusCode."
 }
 
 function Get-CivitaiLinkTarget {
@@ -507,4 +548,5 @@ function Get-LocalLoRAFiles {
 Export-ModuleMember -Function `
     Get-CivitaiLinkTarget, Get-CivitaiModelVersions, Resolve-CivitaiLoRAEntry, New-DirectLoRAEntry, `
     Resolve-LocalLoRADirectory, Get-LocalLoRAFiles, Get-CivitaiCredentialPath, Set-CivitaiStoredCredential, `
-    Get-CivitaiStoredCredential, Get-CivitaiCredential, Remove-CivitaiStoredCredential, Test-CivitaiDownloadCredential
+    Get-CivitaiStoredCredential, Get-CivitaiCredential, Remove-CivitaiStoredCredential, Test-CivitaiDownloadAccess, `
+    Test-CivitaiDownloadCredential, Set-RestrictedCredentialAcl

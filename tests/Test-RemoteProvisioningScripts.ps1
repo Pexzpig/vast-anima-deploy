@@ -86,9 +86,12 @@ if (-not $localProvision.Contains('Uploading the remote verification script fail
     -not $localProvision.Contains('-TimeoutSeconds 0 -Quiet') -or
     -not $localProvision.Contains('CivitaiTokenEnvironmentVariable') -or
     -not $localProvision.Contains('Get-CivitaiCredential') -or
+    -not $localProvision.Contains('Test-CivitaiDownloadAccess') -or
+    -not $localProvision.Contains('Civitai download preflight failed before remote provisioning') -or
     -not $localProvision.Contains('Using Civitai API Key from') -or
     -not $localProvision.Contains('New-RestrictedSecretFile') -or
-    -not $localProvision.Contains('Set-Acl -LiteralPath $path -AclObject $security') -or
+    -not $localProvision.Contains('Set-RestrictedCredentialAcl -Path $path') -or
+    $localProvision.Contains('Set-Acl -LiteralPath $path -AclObject $security') -or
     $localProvision.Contains('[System.IO.File]::SetAccessControl') -or
     -not $localProvision.Contains('.civitai-token.upload') -or
     -not $localProvision.Contains('Remove-Item -LiteralPath $localCivitaiSecret') -or

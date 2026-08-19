@@ -29,22 +29,35 @@ if ($deploymentImage -ne [string]$config.Vast.Instance.Image -and $state.instanc
 Assert-CommandExists -Name 'ssh'
 Assert-CommandExists -Name 'scp'
 
+$enabledCivitaiLoRAs = @($config.Anima.ManagedLoRAs | Where-Object { [bool]$_.Enabled -and [string]$_.Source -eq 'civitai' })
+$civitaiCredential = $null
+if ($enabledCivitaiLoRAs.Count -gt 0) {
+    $tokenEnvironmentVariable = [string]$config.Secrets.CivitaiTokenEnvironmentVariable
+    $civitaiCredential = Get-CivitaiCredential -ProjectRoot $script:ProjectRoot -EnvironmentVariableName $tokenEnvironmentVariable
+    $probeToken = if ($civitaiCredential) { [string]$civitaiCredential.Value } else { $null }
+    Write-Host ("[preflight] Checking access to {0} enabled Civitai LoRA download(s)..." -f $enabledCivitaiLoRAs.Count) -ForegroundColor Cyan
+    try {
+        foreach ($civitaiLoRA in $enabledCivitaiLoRAs) {
+            Test-CivitaiDownloadAccess -DownloadUrl ([string]$civitaiLoRA.Url) -Token $probeToken | Out-Null
+        }
+    } catch {
+        throw "Civitai download preflight failed before remote provisioning. $($_.Exception.Message)"
+    } finally {
+        $probeToken = $null
+    }
+    if ($civitaiCredential) {
+        Write-Host "Civitai download authentication passed using the $($civitaiCredential.Source) credential." -ForegroundColor Green
+    } else {
+        Write-Host 'Enabled Civitai downloads are publicly accessible; no API Key is required for the current list.' -ForegroundColor DarkCyan
+    }
+}
+
 function New-RestrictedSecretFile {
     param([Parameter(Mandatory = $true)][string]$Value)
 
     $path = [System.IO.Path]::GetTempFileName()
     try {
-        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-        $security = New-Object System.Security.AccessControl.FileSecurity
-        $security.SetOwner($identity)
-        $security.SetAccessRuleProtection($true, $false)
-        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $identity,
-            [System.Security.AccessControl.FileSystemRights]::FullControl,
-            [System.Security.AccessControl.AccessControlType]::Allow
-        )
-        $security.AddAccessRule($rule)
-        Set-Acl -LiteralPath $path -AclObject $security
+        Set-RestrictedCredentialAcl -Path $path
         [System.IO.File]::WriteAllText($path, $Value + "`n", (New-Object System.Text.UTF8Encoding($false)))
         return $path
     } catch {
@@ -242,10 +255,7 @@ $remoteCommand = "bash '$remoteUploadDirectory/remote/provision.sh' '$remoteUplo
 $localCivitaiSecret = $null
 $remoteCivitaiSecretUploaded = $false
 try {
-    $enabledCivitaiLoRAs = @($config.Anima.ManagedLoRAs | Where-Object { [bool]$_.Enabled -and [string]$_.Source -eq 'civitai' })
     if ($enabledCivitaiLoRAs.Count -gt 0) {
-        $tokenEnvironmentVariable = [string]$config.Secrets.CivitaiTokenEnvironmentVariable
-        $civitaiCredential = Get-CivitaiCredential -ProjectRoot $script:ProjectRoot -EnvironmentVariableName $tokenEnvironmentVariable
         $civitaiToken = if ($civitaiCredential) { [string]$civitaiCredential.Value } else { $null }
         if ($civitaiToken) {
             if ($civitaiToken -notmatch '^[A-Za-z0-9._-]+$') { throw "$tokenEnvironmentVariable contains unsupported characters." }
@@ -264,9 +274,6 @@ try {
                 "umask 077 && mv '$remoteUploadDirectory/.civitai-token.upload' '$remoteUploadDirectory/.civitai-token'"
             )) -FailureMessage 'Securing the temporary Civitai credential failed.' -Attempts 3 -DelaySeconds 3 -TimeoutSeconds 60 -Quiet
         }
-        else {
-            Write-Warning 'No Civitai API Key is configured. Public downloads will be attempted; protected resources may return HTTP 401. Use ManageLoRA to save a Key.'
-        }
     }
     Invoke-NativeCommandChecked -Command 'ssh' -Arguments ($automatedSshCommon + @(
         '-T', '-n', '-p', [string]$endpoint.Port, $target, $remoteCommand
@@ -279,6 +286,7 @@ catch {
     throw
 }
 finally {
+    $civitaiCredential = $null
     if ($localCivitaiSecret -and (Test-Path -LiteralPath $localCivitaiSecret)) {
         Remove-Item -LiteralPath $localCivitaiSecret -Force -ErrorAction SilentlyContinue
     }

@@ -142,9 +142,9 @@ https://civitai.com/models/2626310/748cm-style-or-krea-2-anima?modelVersionId=29
 
 它会固定版本和文件 ID，并将原文件 `748cm_TA_EP4 (1).safetensors` 安装为 `748cm_TA_EP4_1.safetensors`；触发词 `@748cm_style` 会记录在本地清单中，但不会自动写入提示词。
 
-需要登录的 Civitai 资源，在“管理 LoRA 清单”中选择“录入 Civitai API Key（Anima LoRA 下载）”。输入不会显示；脚本会用清单中的 Civitai 下载地址验证认证，然后通过 Windows DPAPI 按当前用户加密保存到 ignored 的 `user-config/civitai-token.secret`，并限制文件 ACL。重新执行 Provision 时会自动读取、临时上传到远端并在成功或失败后清理。
+需要登录的 Civitai 资源，在“管理 LoRA 清单”中选择“录入 Civitai API Key（Anima LoRA 下载）”。这里需要填写的是 Civitai 账户设置中创建的 API Key，不是 Hugging Face 或其他 Anima 服务的 Key。输入不会显示；脚本会用清单中的 Civitai 下载地址验证认证，然后通过 Windows DPAPI 按当前用户加密保存到 ignored 的 `user-config/civitai-token.secret`，并限制文件 ACL。重新执行 Provision 时会自动读取、临时上传到远端并在成功或失败后清理。
 
-API Key 不会写入 `deployment.json`、state、下载 URL 或部署日志。菜单同时支持查看是否已配置以及清除凭据；其他 Windows 用户不能解密该文件。遇到 HTTP 401 时重新录入有效 Key，然后直接重试 Provision，不需要重建实例。
+API Key 不会写入 `deployment.json`、state、下载 URL 或部署日志。菜单同时支持查看是否已配置以及清除凭据；其他 Windows 用户不能解密该文件。Provision 会在等待 SSH 和执行远端大文件下载前逐项预检启用的 Civitai LoRA：公开资源无需 Key，受保护资源缺少或拒绝 Key 时立即停止并提示录入。遇到 HTTP 401 时重新录入有效 Key，然后直接重试 Provision，不需要重建实例。
 
 环境变量仍作为未保存本地凭据时的高级回退方式：
 
@@ -155,6 +155,29 @@ $env:CIVITAI_API_TOKEN = $credential.GetNetworkCredential().Password
 ```
 
 关闭当前 PowerShell 后环境变量失效；已加密保存的本机凭据仍然有效，并优先于环境变量。修改清单或凭据不会启动实例或立即操作远端；实例运行时需执行 `Provision`。
+
+### 在应用中加载 LoRA
+
+清单下载或本地目录上传只负责把文件安装到应用模型目录，不等于已经在生成中启用。首次安装或修改文件后先执行一次 Provision，再按当前应用加载。
+
+ComfyUI：
+
+1. 打开 `image_anima_base_v1.managed.json` 或 `image_anima_base_v1.hires.managed.json`。
+2. 在工作流顶部找到 `Character LoRA (select file, then set strength)` 或 `Style LoRA (select file, then set strength)`。
+3. 在 `lora_name` 中选择已安装的 `.safetensors`；两个手动槽位初始权重为 `0`，必须把 `strength_model` 改为该 LoRA 的推荐权重才会生效。
+4. 将 LoRA 清单中记录的 `TriggerWords` 手动加入正向提示词。没有触发词的 LoRA 可跳过此步。
+5. 运行工作流；需要对比效果时保持 seed 和其他参数不变，只调整一个 LoRA 或一项权重。
+
+菜单添加的 LoRA 默认是“仅安装”，不会自动进入模型链。只有手工将 `AutoApplyInComfyUI` 设为 `true` 的清单条目才会在重新 Provision 时自动串联进两份托管工作流。手动改过的托管工作流会在重新 Provision 时重建，需要长期保留时应另存为个人工作流。
+
+Forge Classic WebUI：
+
+1. 打开 WebUI 的 Extra Networks/额外网络面板并切换到 LoRA；点击刷新按钮。
+2. 点击目标 LoRA 卡片，正向提示词中应出现类似 `<lora:wlop-2_v1_epoch15:1>` 的标记。
+3. 把最后的数值改为该 LoRA 的推荐权重，例如 `<lora:wlop-2_v1_epoch15:0.8>`。
+4. 将清单中记录的 `TriggerWords` 加入正向提示词，然后开始生成。
+
+WebUI 不会自动修改提示词，因此只看到文件或 LoRA 卡片并不会影响图像。若应用内没有出现新文件，先刷新模型列表；仍未出现时通过 SSH 执行 `supervisorctl restart comfyui` 或 `supervisorctl restart webui`。LoRA 文件名、触发词和推荐权重可在“管理 LoRA 清单”中查看。
 
 ### 项目内本地 LoRA 目录
 
